@@ -19,6 +19,7 @@ Run:
 """
 
 from typing import Dict
+import asyncio
 
 import httpx
 import pytest
@@ -125,15 +126,20 @@ class TestPasswordResetFlow:
             pytest.skip("Password reset not implemented yet")
 
         # Get reset code from database
-        reset_record = await db_connection.fetchrow(
-            """
-            SELECT code, expires_at FROM password_reset_codes
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            uuid.UUID(test_user["user_id"])
-        )
+        reset_record = None
+        for _ in range(5):
+            reset_record = await db_connection.fetchrow(
+                """
+                SELECT code, expires_at FROM password_reset_codes
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                uuid.UUID(test_user["user_id"])
+            )
+            if reset_record:
+                break
+            await asyncio.sleep(0.2)
 
         if reset_record is None:
             pytest.skip("Password reset codes table not found or no code generated")
@@ -184,15 +190,20 @@ class TestPasswordResetFlow:
             pytest.skip("Password reset not implemented yet")
 
         # Step 2: Get reset code
-        reset_record = await db_connection.fetchrow(
-            """
-            SELECT code FROM password_reset_codes
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            uuid.UUID(test_user["user_id"])
-        )
+        reset_record = None
+        for _ in range(5):
+            reset_record = await db_connection.fetchrow(
+                """
+                SELECT code FROM password_reset_codes
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                uuid.UUID(test_user["user_id"])
+            )
+            if reset_record:
+                break
+            await asyncio.sleep(0.2)
 
         if reset_record is None:
             pytest.skip("Password reset codes not implemented")
@@ -668,15 +679,20 @@ class TestEmailVerificationFlow:
         user_id = signup_response.json()["data"]["user_id"]
 
         # Get verification code from database
-        verify_record = await db_connection.fetchrow(
-            """
-            SELECT code FROM email_verification_codes
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            uuid.UUID(user_id)
-        )
+        verify_record = None
+        for _ in range(5):
+            verify_record = await db_connection.fetchrow(
+                """
+                SELECT code FROM email_verification_codes
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                uuid.UUID(user_id)
+            )
+            if verify_record:
+                break
+            await asyncio.sleep(0.2)
 
         if verify_record is None:
             # Email verification not implemented or code not stored
