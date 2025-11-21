@@ -39,4 +39,8 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT: int = 5
     LOGIN_RATE_WINDOW: int = 900  # 15 minutes
 
+    # Account Lockout
+    SECURITY_MAX_LOGIN_ATTEMPTS: int = 5
+    SECURITY_LOCKOUT_DURATION_MINUTES: int = 30
+
 settings = Settings()

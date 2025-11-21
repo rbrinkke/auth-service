@@ -159,6 +159,34 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
     redis_client.close = original_close
     await fake_redis.aclose()
 
+@pytest.fixture
+async def redis_client():
+    """Mock redis client for unit tests"""
+    import fakeredis.aioredis
+    fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    yield fake_redis
+    await fake_redis.aclose()
+
+@pytest.fixture
+async def user_factory(db_session):
+    """Factory to create a user for testing"""
+    from app.models import User
+    from app.core.security import hash_password
+
+    async def _create_user(email="test@example.com", password="password", is_verified=True):
+        user = User(
+            email=email,
+            password_hash=hash_password(password),
+            is_verified=is_verified,
+            mfa_enabled=False
+        )
+        db_session.add(user)
+        await db_session.commit()
+        await db_session.refresh(user)
+        return user
+
+    return _create_user
+
 # Utility functions for integration tests
 def assert_jwt_structure(token: str):
     """
