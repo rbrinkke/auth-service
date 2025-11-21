@@ -180,13 +180,18 @@ def create_access_token(
     org_id: Optional[str],
     roles: list[str],
     email: str,
-    verified: bool
+    verified: bool,
+    expires_delta: Optional[timedelta] = None,
+    scope: Optional[str] = None
 ) -> str:
     """
     Creates a JWT access token using RS256.
     """
     now = datetime.now(timezone.utc)
-    expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    if expires_delta:
+        expire = now + expires_delta
+    else:
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
     jwks = public_key_to_jwk()
     kid = jwks["keys"][0]["kid"]
@@ -202,6 +207,8 @@ def create_access_token(
         "email": email,
         "verified": verified
     }
+    if scope:
+        to_encode["scope"] = scope
 
     encoded_jwt = jwt.encode(
         to_encode,

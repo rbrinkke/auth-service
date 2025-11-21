@@ -15,11 +15,13 @@ from app.core import security
 from app.core.config import settings
 from app.core.exceptions import InvalidCredentialsError, MFARequiredError, AuthenticationError, InvalidTokenError
 from app.services.audit_service import log_audit_event
+from app.services.email import get_email_provider
 
 class AuthService:
     def __init__(self, db: AsyncSession, redis: Redis):
         self.db = db
         self.redis = redis
+        self.email_service = get_email_provider()
 
     async def create_user(self, user_in: UserCreate, ip_address: str) -> User:
         # Check email
@@ -323,4 +325,69 @@ class AuthService:
             await self.db.execute(stmt)
 
         await log_audit_event(self.db, "logout", None, ip_address, True) # User ID might be unknown if token invalid
+        await self.db.commit()
+
+    async def forgot_password(self, email: str, ip_address: str):
+        """
+        Initiate password recovery.
+        """
+        stmt = select(User).where(User.email == email)
+        result = await self.db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        # Security: Always return success to prevent enumeration
+        if not user:
+             await log_audit_event(self.db, "forgot_password_failed", None, ip_address, False, {"reason": "user_not_found"})
+             await self.db.commit()
+             return
+
+        # Generate password reset token (short-lived JWT)
+        # Use a special scope for password reset
+        reset_token = security.create_access_token(
+            user_id=str(user.id),
+            org_id=None,
+            roles=[],
+            email=user.email,
+            verified=user.is_verified,
+            expires_delta=timedelta(minutes=15),
+            scope="password_reset"
+        )
+
+        # Send email
+        await self.email_service.send_password_reset_email(user.email, reset_token)
+
+        await log_audit_event(self.db, "forgot_password_initiated", user.id, ip_address, True)
+        await self.db.commit()
+
+    async def reset_password(self, token: str, new_password: str, ip_address: str):
+        """
+        Reset password using the token.
+        """
+        try:
+            payload = security.decode_access_token(token)
+        except Exception:
+            raise InvalidTokenError("Invalid or expired token")
+
+        if payload.get("scope") != "password_reset":
+            raise InvalidTokenError("Invalid token scope")
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise InvalidTokenError("Invalid token")
+
+        stmt = select(User).where(User.id == uuid.UUID(user_id))
+        result = await self.db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user:
+            raise InvalidTokenError("User not found")
+
+        # Hash new password
+        hashed_password = security.hash_password(new_password)
+        user.password_hash = hashed_password
+
+        # Revoke all existing refresh tokens
+        await self._revoke_user_tokens(user.id)
+
+        await log_audit_event(self.db, "password_reset_success", user.id, ip_address, True)
         await self.db.commit()

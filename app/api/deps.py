@@ -66,6 +66,8 @@ async def get_current_user(
 
         # Store user in request state for potential logging usage
         request.state.user = user
+        # Store claims in request state for RBAC
+        request.state.claims = payload
         return user
 
     except HTTPException:
@@ -78,3 +80,24 @@ async def get_current_user(
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+def require_role(role: str):
+    """
+    Dependency factory to enforce role requirements.
+    Checks if the user has the required role in the current organization context.
+    """
+    async def role_checker(
+        request: Request,
+        current_user: User = Depends(get_current_user)
+    ) -> User:
+        claims = getattr(request.state, "claims", {})
+        roles = claims.get("roles", [])
+
+        if role not in roles:
+             raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required role: {role}"
+            )
+        return current_user
+
+    return role_checker
