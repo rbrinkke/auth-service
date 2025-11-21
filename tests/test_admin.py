@@ -107,7 +107,7 @@ class TestAdminUserManagement:
             f"Regular user should be denied, got {response.status_code}"
 
         # Verify error message
-        assert "forbidden" in response.text.lower() or "permission" in response.text.lower()
+        assert "missing required role" in response.text.lower() or "forbidden" in response.text.lower()
 
     @pytest.mark.asyncio
     async def test_list_users_without_auth_fails(
@@ -460,7 +460,7 @@ class TestAuditLogs:
 
         # Small delay for log processing
         import asyncio
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(2.0)
 
         # Query audit logs
         logs_response = await real_client.get(

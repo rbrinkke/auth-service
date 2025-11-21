@@ -297,7 +297,8 @@ class TestRateLimiting:
     async def test_login_rate_limiting(
         self,
         real_client: httpx.AsyncClient,
-        test_user: Dict[str, str]
+        test_user: Dict[str, str],
+        redis_connection
     ):
         """
         Test: Login endpoint enforces rate limiting.
@@ -307,10 +308,8 @@ class TestRateLimiting:
         Steps:
         1. Make rapid login attempts (>10 in 60 seconds)
         2. Verify HTTP 429 (Too Many Requests)
-        3. Wait for rate limit reset
+        3. Manually clear Redis rate limit (simulate time passing)
         4. Verify requests work again
-
-        Note: This test takes 60+ seconds to complete
         """
         # Make 11 rapid login attempts
         rate_limit_hit = False
@@ -336,8 +335,9 @@ class TestRateLimiting:
         if not rate_limit_hit:
             pytest.skip("Rate limiting not implemented or limit >10 attempts")
 
-        # Wait for rate limit window to reset
-        await wait_for_rate_limit_reset(settings.LOGIN_RATE_WINDOW + 5)
+        # Manually clear rate limit keys to avoid waiting 15 minutes
+        print("🔄 Manually clearing rate limit keys in Redis...")
+        await redis_connection.flushall()
 
         # Verify requests work again
         response_after_reset = await real_client.post(

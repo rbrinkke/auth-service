@@ -89,6 +89,7 @@ async def cleanup_redis():
     """Flush Redis before each test to clear rate limits and other state."""
     import redis.asyncio as aioredis
     try:
+        # Connect to exposed Docker port 6380
         redis_client = await aioredis.from_url("redis://localhost:6380/0")
         await redis_client.flushall()
         await redis_client.aclose()
@@ -366,6 +367,8 @@ async def admin_token(real_client, test_admin_user):
         json={"email": test_admin_user["email"], "password": test_admin_user["password"], "org_id": test_admin_user["org_id"]}
     )
     assert response.status_code == 200
+    data = response.json()
+    token = data["data"]["access_token"]
     return token
 
 @pytest.fixture

@@ -7,6 +7,7 @@ from sqlalchemy import select, desc
 from app.api import deps
 from app.models import User, AuditLog
 from app.schemas.auth import UserRead, APIResponse, AuditLogRead
+from app.services.audit_service import log_audit_event
 
 router = APIRouter()
 
@@ -76,6 +77,7 @@ async def ban_user(
     # But their tokens might still be valid for a bit until checked?
     # `get_current_user` checks `user.is_verified`. So immediate effect.
 
+    await log_audit_event(db, "user_banned", current_user.id, "admin_action", True, {"target_user_id": str(user_id)})
     await db.commit()
 
     return APIResponse(success=True, data={"message": "User banned (is_verified set to False)"})
@@ -97,6 +99,7 @@ async def unban_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     user.is_verified = True
+    await log_audit_event(db, "user_unbanned", current_user.id, "admin_action", True, {"target_user_id": str(user_id)})
     await db.commit()
 
     return APIResponse(success=True, data={"message": "User unbanned (is_verified set to True)", "user_id": str(user_id)})
