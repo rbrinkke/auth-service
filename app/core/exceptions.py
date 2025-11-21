@@ -25,3 +25,23 @@ class AccountLockedError(AuthenticationError):
 class InvalidScopesError(AuthenticationError):
     """Requested scope is invalid."""
     pass
+
+class EmailAlreadyExistsError(Exception):
+    """Email is already registered."""
+    pass
+
+class UserNotFoundError(Exception):
+    """User not found."""
+    pass
+
+class InvalidVerificationCodeError(Exception):
+    """Verification code is invalid or expired."""
+    pass
+
+class OrganizationNotFoundError(Exception):
+    """Organization not found."""
+    pass
+
+class MembershipNotFoundError(Exception):
+    """User is not a member of the organization."""
+    pass

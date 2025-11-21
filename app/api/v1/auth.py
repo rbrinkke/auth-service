@@ -10,6 +10,8 @@ from app.schemas.auth import (
     APIResponse, TokenResponse, MFAResponse, TokenRequest
 )
 from app.services.auth_service import AuthService
+from app.services.user_service import UserService
+from app.services.mfa_service import MFAService
 from app.utils.rate_limiter import limiter
 from app.core.config import settings
 from app.core.redis import redis_client
@@ -35,7 +37,7 @@ async def signup(
     # Rate limit: 3 per hour per IP
     await limiter.limit(redis, request.client.host, "signup", 3, 3600, response)
 
-    service = AuthService(db, redis)
+    service = UserService(db, redis)
     user = await service.create_user(user_in, request.client.host)
 
     return APIResponse(
@@ -91,6 +93,7 @@ async def mfa_verify(
     Verify MFA code and issue tokens.
     """
     service = AuthService(db, redis)
+    # verify_mfa is still in AuthService as it issues tokens
     result = await service.verify_mfa(mfa_in.session_token, mfa_in.totp_code, request.client.host)
     return APIResponse(success=True, data=result)
 
@@ -177,7 +180,7 @@ async def verify_email(
     Verify email address with code.
     """
     await limiter.limit(redis, request.client.host, "verify_email", 5, 900, response)
-    service = AuthService(db, redis)
+    service = UserService(db, redis)
     await service.verify_email(verify_in.email, verify_in.code)
     return APIResponse(
         success=True,
@@ -196,7 +199,7 @@ async def resend_verification(
     Resend email verification code.
     """
     await limiter.limit(redis, request.client.host, "resend_verification", 3, 900, response)
-    service = AuthService(db, redis)
+    service = UserService(db, redis)
     await service.resend_verification(resend_in.email)
     return APIResponse(
         success=True,
