@@ -5,7 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.security import load_rsa_keys
-from app.core.exceptions import AuthenticationError
+from app.core.exceptions import (
+    AuthenticationError,
+    EmailAlreadyExistsError,
+    UserNotFoundError,
+    InvalidVerificationCodeError,
+    OrganizationNotFoundError,
+    MembershipNotFoundError
+)
 from app.api.v1 import auth, wellknown, users, admin
 from app.db.session import engine
 from app.utils.logging import setup_logging
@@ -71,6 +78,71 @@ async def auth_exception_handler(request: Request, exc: AuthenticationError):
             "success": False,
             "error": {
                 "code": exc.__class__.__name__,
+                "message": str(exc)
+            }
+        }
+    )
+
+@app.exception_handler(EmailAlreadyExistsError)
+async def email_exists_exception_handler(request: Request, exc: EmailAlreadyExistsError):
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "success": False,
+            "error": {
+                "code": "EmailAlreadyExistsError",
+                "message": str(exc)
+            }
+        }
+    )
+
+@app.exception_handler(UserNotFoundError)
+async def user_not_found_exception_handler(request: Request, exc: UserNotFoundError):
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "success": False,
+            "error": {
+                "code": "UserNotFoundError",
+                "message": str(exc)
+            }
+        }
+    )
+
+@app.exception_handler(InvalidVerificationCodeError)
+async def invalid_code_exception_handler(request: Request, exc: InvalidVerificationCodeError):
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "success": False,
+            "error": {
+                "code": "InvalidVerificationCodeError",
+                "message": str(exc)
+            }
+        }
+    )
+
+@app.exception_handler(OrganizationNotFoundError)
+async def org_not_found_exception_handler(request: Request, exc: OrganizationNotFoundError):
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "success": False,
+            "error": {
+                "code": "OrganizationNotFoundError",
+                "message": str(exc)
+            }
+        }
+    )
+
+@app.exception_handler(MembershipNotFoundError)
+async def membership_not_found_exception_handler(request: Request, exc: MembershipNotFoundError):
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={
+            "success": False,
+            "error": {
+                "code": "MembershipNotFoundError",
                 "message": str(exc)
             }
         }

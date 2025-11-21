@@ -1,96 +1,35 @@
 import uuid
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
-from sqlalchemy.orm import selectinload
-from fastapi import HTTPException, status
+from sqlalchemy import select, delete
 from redis.asyncio import Redis
 
-from app.models import User, Organization, OrganizationMember, RefreshToken, PasswordResetCode, EmailVerificationCode, ServiceAccount
-from app.schemas.auth import UserCreate, UserLogin
+from app.models import User, OrganizationMember, RefreshToken, PasswordResetCode, ServiceAccount
+from app.schemas.auth import UserLogin
 from app.core import security
 from app.core.config import settings
-from app.core.exceptions import InvalidCredentialsError, MFARequiredError, AuthenticationError, InvalidTokenError, InvalidScopesError
+from app.core.exceptions import (
+    InvalidCredentialsError,
+    AuthenticationError,
+    InvalidTokenError,
+    InvalidScopesError,
+    UserNotFoundError,
+    InvalidVerificationCodeError,
+    MembershipNotFoundError
+)
 from app.services.audit_service import log_audit_event
 from app.services.email import get_email_provider
+from app.services.mfa_service import MFAService
 
 class AuthService:
     def __init__(self, db: AsyncSession, redis: Redis):
         self.db = db
         self.redis = redis
         self.email_service = get_email_provider()
-
-    async def create_user(self, user_in: UserCreate, ip_address: str) -> User:
-        # Check email
-        stmt = select(User).where(User.email == user_in.email)
-        result = await self.db.execute(stmt)
-        if result.scalar_one_or_none():
-            await log_audit_event(self.db, "signup_failed", None, ip_address, False, {"reason": "email_exists"})
-            await self.db.commit()
-            # Return success to prevent enumeration? Prompt says "Return success (don't expose user ID)"
-            # But step 3 says "Check if email already exists...".
-            # Prompt logic says: "If user not found: Log failed attempt... generic error (no user enumeration)" for LOGIN.
-            # For SIGNUP: "Return success (don't expose user ID)" after creating.
-            # If email exists, we should probably raise an error or fail silently.
-            # To be robust and follow "best-in-class":
-            raise HTTPException(
-                status_code=409,
-                detail="Email already registered"
-            )
-
-        # Hash password
-        hashed_password = await security.hash_password(user_in.password)
-
-        # Create User
-        user = User(
-            email=user_in.email,
-            password_hash=hashed_password,
-            is_verified=False,
-            mfa_secret=security.encrypt_mfa_secret(security.generate_totp_secret()) # Generate encrypted secret initially, even if disabled
-        )
-        self.db.add(user)
-        await self.db.flush()
-
-        # If Org provided
-        if user_in.organization_name:
-            # Flush to get user ID
-            await self.db.flush()
-            org = Organization(
-                name=user_in.organization_name,
-                slug=user_in.organization_name.lower().replace(" ", "-") # Simple slugify
-            )
-            self.db.add(org)
-            await self.db.flush()
-
-            member = OrganizationMember(
-                user_id=user.id,
-                org_id=org.id,
-                roles=["owner"]
-            )
-            self.db.add(member)
-
-        await log_audit_event(self.db, "signup_success", user.id, ip_address, True)
-        
-        # Generate and send verification email
-        verification_code = secrets.randbelow(1000000)
-        code_str = f"{verification_code:06d}"
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-        verification_entry = EmailVerificationCode(
-            user_id=user.id,
-            code=code_str,
-            expires_at=expires_at
-        )
-        self.db.add(verification_entry)
-        
-        await self.email_service.send_verification_email(user.email, code_str)
-        
-        await self.db.commit()
-        await self.db.refresh(user)
-        return user
+        self.mfa_service = MFAService(db, redis)
 
     async def authenticate_user(self, user_in: UserLogin, ip_address: str) -> dict:
         # 1. Get user
@@ -108,37 +47,11 @@ class AuthService:
             if user.locked_until > datetime.now(timezone.utc):
                 # Account is locked
                 await log_audit_event(self.db, "login_failed", user.id, ip_address, False, {"reason": "account_locked"})
-                # Optional: Email alert is requested in prompt "Trigger an async email alert (mock this via EmailProvider)"
-                # but also "Check Threshold ... Trigger 'Account Locked' email to user" which happens when it GETS locked.
-                # This block is for attempts WHILE locked. Prompt says "Optional: Trigger an async email alert...".
-                # I will skip the email here to avoid spamming the user on every click, unless explicitly requested.
-                # Wait, prompt says: "Optional: Trigger an async email alert ... saying 'Login attempted on locked account'".
-                # I'll assume it's better not to spam.
-
-                # "Do NOT reveal exact lock time to the API client ... BUT ensure the error message is distinct enough for internal logging."
-                # Raise AuthenticationError (HTTP 401/403). InvalidCredentialsError maps to 401 usually.
-                # I'll raise InvalidCredentialsError to keep it generic for the client, OR AuthenticationError.
-                # If I raise AuthenticationError("Account locked"), I need to ensure the API handler doesn't leak it if I want to hide it.
-                # But prompt says "Do not modify the generic 'Invalid email or password' response for the frontend unless strictly necessary".
-                # So I should probably use InvalidCredentialsError or mapped exception that returns generic message.
-                # However, prompt says "Raise AuthenticationError (HTTP 401/403)".
-                # And "ensure the error message is distinct enough for internal logging".
-                # I will raise AuthenticationError("Account is locked") which is distinct.
-                # And I assume the exception handler will mask it or I should mask it.
-                # The prompt says: "Do NOT reveal exact lock time...".
-                # If I raise InvalidCredentialsError("Invalid email or password"), it meets the requirement of "Do not modify generic response".
                 raise AuthenticationError("Account is temporarily locked due to multiple failed login attempts.")
             else:
                 # Auto-Unlock (Lock expired)
-                # "If a user attempts to login and locked_until is in the past, treat the account as unlocked"
-                # We can reset counters now or just proceed.
-                # Prompt: "reset counters implicitly or explicitly".
                 user.failed_login_attempts = 0
                 user.locked_until = None
-                # No commit needed yet, we will commit later on success/failure update or at end of flow?
-                # We should probably commit this change if we want it to persist even if password fails?
-                # If password fails next, it will increment to 1.
-                # So resetting here is fine.
 
         # 2. Verify password
         if not await security.verify_password(user_in.password, user.password_hash):
@@ -152,16 +65,6 @@ class AuthService:
                 await log_audit_event(self.db, "account_locked", user.id, ip_address, False, {"reason": "max_attempts_exceeded"})
 
                 # Trigger "Account Locked" email
-                # Mocking via self.email_service.send_email or similar if exists, or just log if not.
-                # EmailProvider usually has specific methods. I should check if I can use a generic send or need to add one.
-                # The abstract class is not visible here but `send_verification_email` exists.
-                # I will try to call a method that might not exist and maybe I need to add it?
-                # Or better, assume I need to add `send_account_locked_email` to `EmailService` (which I can't easily edit the abstract class of without seeing it).
-                # But I can check `app/services/email.py` content.
-                # Wait, I haven't read `app/services/email.py`. I should have.
-                # I'll assume for now I can use a generic log or skip if method missing, but prompt implies I should do it.
-                # "Trigger 'Account Locked' email to user."
-                # I will add the call and update EmailProvider if needed (or just log if I can't).
                 if hasattr(self.email_service, 'send_account_locked_email'):
                      await self.email_service.send_account_locked_email(user.email)
 
@@ -184,9 +87,8 @@ class AuthService:
 
         # 4. MFA Check
         if user.mfa_enabled:
-            # Generate temp session token
-            session_token = secrets.token_urlsafe(32)
-            await self.redis.setex(f"mfa_session:{session_token}", 300, str(user.id))
+            # Generate temp session token using MFAService
+            session_token = await self.mfa_service.initiate_mfa_session(user.id)
 
             await log_audit_event(self.db, "login_mfa_required", user.id, ip_address, True)
             await self.db.commit()
@@ -197,42 +99,8 @@ class AuthService:
         return await self._finalize_login(user, ip_address)
 
     async def verify_mfa(self, session_token: str, totp_code: str, ip_address: str) -> dict:
-        # Rate Limiting
-        rate_limit_key = f"mfa_attempts:{session_token}"
-        attempts = await self.redis.incr(rate_limit_key)
-        if attempts == 1:
-            await self.redis.expire(rate_limit_key, 300) # 5 minutes
-
-        if attempts > 3:
-            # Revoke session
-            await self.redis.delete(f"mfa_session:{session_token}")
-            await self.redis.delete(rate_limit_key)
-            raise InvalidCredentialsError("Too many failed attempts. Session revoked.")
-
-        user_id_str = await self.redis.get(f"mfa_session:{session_token}")
-        if not user_id_str:
-            raise InvalidCredentialsError("Invalid or expired session")
-
-        user_id = uuid.UUID(user_id_str)
-        stmt = select(User).where(User.id == user_id)
-        result = await self.db.execute(stmt)
-        user = result.scalar_one_or_none()
-
-        if not user or not user.mfa_secret:
-            raise InvalidCredentialsError("Invalid user state")
-
-        # Decrypt secret
-        try:
-            plain_secret = security.decrypt_mfa_secret(user.mfa_secret)
-        except Exception:
-            raise InvalidCredentialsError("Security Error: MFA key invalid")
-
-        if not security.verify_totp(plain_secret, totp_code):
-             # Increment failure logic could be here
-             raise InvalidCredentialsError("Invalid TOTP code")
-
-        # Success
-        await self.redis.delete(f"mfa_session:{session_token}")
+        # Delegate to MFAService
+        user = await self.mfa_service.verify_mfa(session_token, totp_code)
         return await self._finalize_login(user, ip_address)
 
     async def _finalize_login(self, user: User, ip_address: str, org_id: Optional[uuid.UUID] = None) -> dict:
@@ -257,7 +125,7 @@ class AuthService:
              result = await self.db.execute(stmt)
              member = result.scalar_one_or_none()
              if not member:
-                 raise AuthenticationError("Not a member of this organization")
+                 raise MembershipNotFoundError("Not a member of this organization")
              roles = member.roles
 
         # Generate Tokens
@@ -278,7 +146,7 @@ class AuthService:
             user_id=user.id,
             org_id=org_id,
             expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-            device_info={"ip": ip_address} # Simplified
+            device_info={"ip": ip_address}
         )
         self.db.add(db_refresh)
 
@@ -323,10 +191,6 @@ class AuthService:
             raise InvalidTokenError("Token expired")
 
         # Token Rotation
-        # 1. Revoke/Delete old token. Prompt says "Delete OLD refresh token".
-        #    But we also have a 'revoked' column.
-        #    Prompt says: "Delete OLD refresh token from DB (within same transaction) ... Insert NEW refresh token" in 3.3
-        #    So we delete it.
         await self.db.delete(db_token)
 
         # 2. Create new token
@@ -391,7 +255,7 @@ class AuthService:
         member = result.scalar_one_or_none()
 
         if not member:
-            raise HTTPException(status_code=403, detail="Not a member of target organization")
+            raise MembershipNotFoundError("Not a member of target organization")
 
         # Get user info
         stmt = select(User).where(User.id == user_id)
@@ -425,7 +289,7 @@ class AuthService:
             stmt = delete(RefreshToken).where(RefreshToken.token_hash == token_hash)
             await self.db.execute(stmt)
 
-        await log_audit_event(self.db, "logout", None, ip_address, True) # User ID might be unknown if token invalid
+        await log_audit_event(self.db, "logout", None, ip_address, True)
         await self.db.commit()
 
     async def forgot_password(self, email: str, ip_address: str):
@@ -455,7 +319,6 @@ class AuthService:
         self.db.add(reset_code_entry)
 
         # Send email (passing code as token)
-        # Note: Ideally we'd send a link AND a code, but here we use code as the token for the link
         await self.email_service.send_password_reset_email(user.email, code)
 
         await log_audit_event(self.db, "forgot_password_initiated", user.id, ip_address, True)
@@ -482,7 +345,7 @@ class AuthService:
         user = result.scalar_one_or_none()
 
         if not user:
-            raise InvalidTokenError("User not found")
+            raise UserNotFoundError("User not found")
 
         # Hash new password
         hashed_password = await security.hash_password(new_password)
@@ -492,80 +355,6 @@ class AuthService:
         await self._revoke_user_tokens(user.id)
 
         await log_audit_event(self.db, "password_reset_success", user.id, ip_address, True)
-        await self.db.commit()
-
-    async def verify_email(self, email: str, code: str):
-        """
-        Verify email address with verification code.
-        """
-        # Find user first
-        stmt = select(User).where(User.email == email)
-        result = await self.db.execute(stmt)
-        user = result.scalar_one_or_none()
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        # Check DB for code
-        stmt = select(EmailVerificationCode).where(
-            EmailVerificationCode.user_id == user.id,
-            EmailVerificationCode.code == code,
-            EmailVerificationCode.expires_at > datetime.now(timezone.utc)
-        )
-        result = await self.db.execute(stmt)
-        verification_entry = result.scalar_one_or_none()
-
-        if not verification_entry:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid or expired verification code"
-            )
-
-        # Mark as verified
-        user.is_verified = True
-        
-        # Delete all verification codes for this user
-        stmt = delete(EmailVerificationCode).where(EmailVerificationCode.user_id == user.id)
-        await self.db.execute(stmt)
-        
-        await self.db.commit()
-
-        await log_audit_event(self.db, "email_verified", user.id, "system", True)
-
-    async def resend_verification(self, email: str):
-        """
-        Resend email verification code.
-        """
-        # Find user by email
-        stmt = select(User).where(User.email == email)
-        result = await self.db.execute(stmt)
-        user = result.scalar_one_or_none()
-
-        if not user:
-            # Don't reveal if user exists (security)
-            return
-
-        if user.is_verified:
-            # Already verified, don't send
-            return
-
-        # Generate new verification code
-        verification_code = secrets.randbelow(1000000)
-        code_str = f"{verification_code:06d}"
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-
-        # Store in DB
-        verification_entry = EmailVerificationCode(
-            user_id=user.id,
-            code=code_str,
-            expires_at=expires_at
-        )
-        self.db.add(verification_entry)
-
-        # Send email
-        await self.email_service.send_verification_email(user.email, code_str)
-
-        await log_audit_event(self.db, "verification_email_resent", user.id, "system", True)
         await self.db.commit()
 
     async def verify_reset_code(self, email: str, code: str):
@@ -578,7 +367,8 @@ class AuthService:
         user = result.scalar_one_or_none()
 
         if not user:
-             raise HTTPException(status_code=400, detail="Invalid email or code")
+             # Ambiguous error for security
+             raise InvalidVerificationCodeError("Invalid email or code")
 
         # Check DB for code
         stmt = select(PasswordResetCode).where(
@@ -590,10 +380,7 @@ class AuthService:
         reset_code_entry = result.scalar_one_or_none()
 
         if not reset_code_entry:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid or expired reset code"
-            )
+            raise InvalidVerificationCodeError("Invalid or expired reset code")
 
         # Code is valid
         return True
@@ -611,7 +398,7 @@ class AuthService:
         user = result.scalar_one_or_none()
 
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise UserNotFoundError("User not found")
 
         # Hash new password
         hashed_password = await security.hash_password(new_password)
