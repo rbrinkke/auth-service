@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.security import load_rsa_keys
 from app.core.exceptions import AuthenticationError
-from app.api.v1 import auth, wellknown
+from app.api.v1 import auth, wellknown, users
 from app.db.session import engine
 from app.utils.logging import setup_logging
 from app.core.redis import redis_client
@@ -78,6 +78,7 @@ async def auth_exception_handler(request: Request, exc: AuthenticationError):
 
 # Include Routers
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
+app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(wellknown.router, prefix="/.well-known", tags=["Discovery"])
 
 @app.get("/health")
