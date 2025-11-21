@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     )
 
     # Database
-    DATABASE_URL: str = "postgresql+asyncpg://user:password@localhost:5432/idp_db"
+    DATABASE_URL: str = "postgresql+asyncpg://user:password@127.0.0.1:5433/idp_db"
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 40
 

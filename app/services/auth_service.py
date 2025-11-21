@@ -37,7 +37,7 @@ class AuthService:
             # If email exists, we should probably raise an error or fail silently.
             # To be robust and follow "best-in-class":
             raise HTTPException(
-                status_code=400,
+                status_code=409,
                 detail="Email already registered"
             )
 
@@ -93,7 +93,13 @@ class AuthService:
             await self.db.commit()
             raise InvalidCredentialsError("Invalid email or password")
 
-        # 3. MFA Check
+        # 3. Verify user is active/verified
+        if not user.is_verified:
+            await log_audit_event(self.db, "login_failed", user.id, ip_address, False, {"reason": "user_not_verified"})
+            await self.db.commit()
+            raise InvalidCredentialsError("Account not verified or is inactive")
+
+        # 4. MFA Check
         if user.mfa_enabled:
             # Generate temp session token
             session_token = secrets.token_urlsafe(32)
@@ -277,7 +283,7 @@ class AuthService:
         }
 
     async def _revoke_user_tokens(self, user_id: uuid.UUID):
-        stmt = update(RefreshToken).where(RefreshToken.user_id == user_id).values(revoked=True)
+        stmt = delete(RefreshToken).where(RefreshToken.user_id == user_id)
         await self.db.execute(stmt)
 
     async def switch_org(self, user_id: uuid.UUID, target_org_id: uuid.UUID) -> dict:
@@ -321,7 +327,7 @@ class AuthService:
             if token:
                 await self._revoke_user_tokens(token.user_id)
         else:
-            stmt = update(RefreshToken).where(RefreshToken.token_hash == token_hash).values(revoked=True)
+            stmt = delete(RefreshToken).where(RefreshToken.token_hash == token_hash)
             await self.db.execute(stmt)
 
         await log_audit_event(self.db, "logout", None, ip_address, True) # User ID might be unknown if token invalid
@@ -390,4 +396,119 @@ class AuthService:
         await self._revoke_user_tokens(user.id)
 
         await log_audit_event(self.db, "password_reset_success", user.id, ip_address, True)
+        await self.db.commit()
+
+    async def verify_email(self, email: str, code: str):
+        """
+        Verify email address with verification code.
+        """
+        # Get verification code from Redis
+        redis_key = f"email_verification:{email}"
+        stored_code = await self.redis.get(redis_key)
+
+        if not stored_code or stored_code != code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification code"
+            )
+
+        # Find user by email
+        stmt = select(User).where(User.email == email)
+        result = await self.db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Mark as verified
+        user.is_verified = True
+        await self.db.commit()
+
+        # Delete verification code from Redis
+        await self.redis.delete(redis_key)
+
+        await log_audit_event(self.db, "email_verified", user.id, "system", True)
+
+    async def resend_verification(self, email: str):
+        """
+        Resend email verification code.
+        """
+        # Find user by email
+        stmt = select(User).where(User.email == email)
+        result = await self.db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user:
+            # Don't reveal if user exists (security)
+            return
+
+        if user.is_verified:
+            # Already verified, don't send
+            return
+
+        # Generate new verification code
+        import secrets
+        verification_code = secrets.randbelow(1000000)
+        code_str = f"{verification_code:06d}"
+
+        # Store in Redis with 15 min expiry
+        redis_key = f"email_verification:{email}"
+        await self.redis.setex(redis_key, 900, code_str)
+
+        # Send email
+        await self.email_service.send_verification_email(user.email, code_str)
+
+        await log_audit_event(self.db, "verification_email_resent", user.id, "system", True)
+
+    async def verify_reset_code(self, email: str, code: str):
+        """
+        Verify password reset code validity (without resetting password).
+        """
+        redis_key = f"password_reset:{email}"
+        stored_code = await self.redis.get(redis_key)
+
+        if not stored_code or stored_code != code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset code"
+            )
+
+        # Code is valid
+        return True
+
+    async def reset_password_with_code(self, email: str, code: str, new_password: str, ip_address: str):
+        """
+        Reset password using email + code instead of token.
+        """
+        # Verify code first
+        await self.verify_reset_code(email, code)
+
+        # Find user
+        stmt = select(User).where(User.email == email)
+        result = await self.db.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Hash new password
+        hashed_password = security.hash_password(new_password)
+        user.password_hash = hashed_password
+
+        # Revoke all existing refresh tokens
+        await self._revoke_user_tokens(user.id)
+
+        # Delete reset code from Redis
+        redis_key = f"password_reset:{email}"
+        await self.redis.delete(redis_key)
+
+        await log_audit_event(self.db, "password_reset_success", user.id, ip_address, True)
+        await self.db.commit()
+
+    async def logout_all_sessions(self, user_id: uuid.UUID, ip_address: str):
+        """
+        Revoke all refresh tokens for a user (logout all devices).
+        """
+        await self._revoke_user_tokens(user_id)
+        await log_audit_event(self.db, "logout_all_sessions", user_id, ip_address, True)
         await self.db.commit()

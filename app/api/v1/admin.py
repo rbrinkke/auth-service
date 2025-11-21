@@ -80,6 +80,27 @@ async def ban_user(
 
     return APIResponse(success=True, data={"message": "User banned (is_verified set to False)"})
 
+@router.post("/users/{user_id}/unban", response_model=APIResponse)
+async def unban_user(
+    user_id: UUID,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.require_role("admin"))
+):
+    """
+    Unban a user (set is_verified = True).
+    """
+    stmt = select(User).where(User.id == user_id)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_verified = True
+    await db.commit()
+
+    return APIResponse(success=True, data={"message": "User unbanned (is_verified set to True)", "user_id": str(user_id)})
+
 @router.get("/audit-logs", response_model=APIResponse)
 async def get_audit_logs(
     limit: int = Query(50, ge=1, le=100),
@@ -102,3 +123,17 @@ async def get_audit_logs(
     log_data = [AuditLogRead.model_validate(l) for l in logs]
 
     return APIResponse(success=True, data=log_data)
+
+@router.post("/organizations", response_model=APIResponse, status_code=status.HTTP_501_NOT_IMPLEMENTED)
+async def create_organization(
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.require_role("admin"))
+):
+    """
+    Create new organization - NOT IMPLEMENTED (returns 501).
+    Organization table not yet implemented in database.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Organization management not yet implemented"
+    )

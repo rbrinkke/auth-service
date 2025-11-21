@@ -6,6 +6,7 @@ from app.api import deps
 from app.schemas.auth import (
     UserCreate, UserLogin, MFAVerify, RefreshRequest,
     LogoutRequest, SwitchOrgRequest, ForgotPasswordRequest, ResetPasswordRequest,
+    EmailVerifyRequest, ResendVerificationRequest, PasswordResetVerifyRequest, PasswordResetConfirmRequest,
     APIResponse, TokenResponse, MFAResponse
 )
 from app.services.auth_service import AuthService
@@ -34,11 +35,15 @@ async def signup(
     await limiter.limit(redis, request.client.host, "signup", 3, 3600)
 
     service = AuthService(db, redis)
-    await service.create_user(user_in, request.client.host)
+    user = await service.create_user(user_in, request.client.host)
 
     return APIResponse(
         success=True,
-        data={"message": "Account created. Please verify your email."}
+        data={
+            "message": "Account created. Please verify your email.",
+            "user_id": str(user.id),
+            "email": user.email
+        }
     )
 
 @router.post("/login", response_model=APIResponse)
@@ -167,4 +172,108 @@ async def reset_password(
     return APIResponse(
         success=True,
         data={"message": "Password reset successfully. You can now login."}
+    )
+
+# Email Verification Endpoints
+@router.post("/verify-email", response_model=APIResponse)
+async def verify_email(
+    request: Request,
+    verify_in: EmailVerifyRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Verify email address with code.
+    """
+    await limiter.limit(redis, request.client.host, "verify_email", 5, 900)
+    service = AuthService(db, redis)
+    await service.verify_email(verify_in.email, verify_in.code)
+    return APIResponse(
+        success=True,
+        data={"message": "Email verified successfully. You can now login."}
+    )
+
+@router.post("/resend-verification", response_model=APIResponse)
+async def resend_verification(
+    request: Request,
+    resend_in: ResendVerificationRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Resend email verification code.
+    """
+    await limiter.limit(redis, request.client.host, "resend_verification", 3, 900)
+    service = AuthService(db, redis)
+    await service.resend_verification(resend_in.email)
+    return APIResponse(
+        success=True,
+        data={"message": "If an account exists with this email, a verification code has been sent."}
+    )
+
+# Password Reset Aliases (for test compatibility)
+@router.post("/password-reset/request", response_model=APIResponse)
+async def password_reset_request(
+    request: Request,
+    forgot_in: ForgotPasswordRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Alias for /forgot-password - Initiate password recovery flow.
+    """
+    return await forgot_password(request, forgot_in, db, redis)
+
+@router.post("/password-reset/verify", response_model=APIResponse)
+async def password_reset_verify(
+    request: Request,
+    verify_in: PasswordResetVerifyRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Verify password reset code validity.
+    """
+    await limiter.limit(redis, request.client.host, "password_reset_verify", 5, 900)
+    service = AuthService(db, redis)
+    await service.verify_reset_code(verify_in.email, verify_in.code)
+    return APIResponse(
+        success=True,
+        data={"valid": True, "message": "Reset code is valid"}
+    )
+
+@router.post("/password-reset/confirm", response_model=APIResponse)
+async def password_reset_confirm(
+    request: Request,
+    confirm_in: PasswordResetConfirmRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Complete password reset with code (alternative to token-based reset).
+    """
+    await limiter.limit(redis, request.client.host, "password_reset_confirm", 5, 900)
+    service = AuthService(db, redis)
+    await service.reset_password_with_code(confirm_in.email, confirm_in.code, confirm_in.new_password, request.client.host)
+    return APIResponse(
+        success=True,
+        data={"message": "Password reset successfully. You can now login."}
+    )
+
+# Logout All Sessions
+@router.post("/logout/all", response_model=APIResponse)
+async def logout_all(
+    request: Request,
+    current_user: User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Revoke all refresh tokens for current user.
+    """
+    service = AuthService(db, redis)
+    await service.logout_all_sessions(current_user.id, request.client.host)
+    return APIResponse(
+        success=True,
+        data={"message": "All sessions logged out successfully"}
     )

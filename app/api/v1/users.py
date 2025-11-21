@@ -81,6 +81,19 @@ async def enable_mfa(
     return APIResponse(success=True, data={"message": "MFA enabled successfully."})
 
 
+@router.get("/organizations", response_model=APIResponse, status_code=status.HTTP_501_NOT_IMPLEMENTED)
+async def list_user_organizations(
+    current_user: User = Depends(deps.get_current_user),
+):
+    """
+    List user's organizations - NOT IMPLEMENTED (returns 501).
+    Organization table not yet implemented in database.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Organization management not yet implemented"
+    )
+
 @router.delete("/me", response_model=APIResponse)
 async def delete_user_me(
     request: Request,

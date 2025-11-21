@@ -84,12 +84,26 @@ TestingSessionLocal = async_sessionmaker(
     autocommit=False
 )
 
+@pytest.fixture(scope="function", autouse=True)
+async def cleanup_redis():
+    """Flush Redis before each test to clear rate limits and other state."""
+    import redis.asyncio as aioredis
+    try:
+        redis_client = await aioredis.from_url("redis://localhost:6380/0")
+        await redis_client.flushall()
+        await redis_client.aclose()
+    except Exception as e:
+        print(f"Warning: Could not connect to Redis or flush: {e}")
+    yield
+
 @pytest.fixture(scope="session")
 def anyio_backend():
     return "asyncio"
 
 @pytest.fixture(scope="function")
 async def init_db():
+    # Import app.models here to ensure models are loaded before create_all
+    import app.models 
     # Create tables
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -143,3 +157,278 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
     redis_client.init = original_init
     redis_client.close = original_close
     await fake_redis.aclose()
+
+# Utility functions for integration tests
+def assert_jwt_structure(token: str):
+    """
+    Validate JWT structure without verification.
+    Returns: Decoded payload (header + payload only, no signature verification)
+    """
+    import base64
+    import json
+
+    parts = token.split('.')
+    assert len(parts) == 3, "Invalid JWT structure"
+
+    # Decode header
+    header_data = parts[0] + '=' * (-len(parts[0]) % 4)
+    header = json.loads(base64.urlsafe_b64decode(header_data))
+
+    # Decode payload
+    payload_data = parts[1] + '=' * (-len(parts[1]) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(payload_data))
+
+    assert "typ" in header, "Missing typ in JWT header"
+    assert "alg" in header, "Missing alg in JWT header"
+    assert "sub" in payload, "Missing sub in JWT payload"
+    assert "exp" in payload, "Missing exp in JWT payload"
+
+    return {"header": header, "payload": payload}
+
+
+async def wait_for_rate_limit_reset(seconds: int = 61):
+    """
+    Wait for rate limit window to reset.
+    Use this between tests that might trigger rate limiting.
+    """
+    import asyncio
+    print(f"⏳ Waiting {seconds}s for rate limit reset...")
+    await asyncio.sleep(seconds)
+    print("✅ Rate limit window reset")
+
+# Real integration test fixtures
+@pytest.fixture
+async def real_client():
+    """HTTPx client to REAL service at localhost:8000"""
+    import httpx
+    async with httpx.AsyncClient(
+        base_url="http://localhost:8000",
+        timeout=30.0,
+        follow_redirects=True
+    ) as client:
+        # Verify service is reachable
+        try:
+            response = await client.get("/health")
+            assert response.status_code == 200
+        except httpx.ConnectError:
+            pytest.fail("Cannot connect to service at localhost:8000. Is it running?")
+        yield client
+
+@pytest.fixture
+async def db_connection():
+    """Direct PostgreSQL connection"""
+    import asyncpg
+    conn = await asyncpg.connect(
+        host="localhost",
+        port=5433,
+        database="idp_db",
+        user="user",
+        password="password"
+    )
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+@pytest.fixture
+async def redis_connection():
+    """Direct Redis connection"""
+    import redis.asyncio as aioredis
+    redis_client = await aioredis.from_url("redis://localhost:6380/0", decode_responses=True)
+    try:
+        yield redis_client
+    finally:
+        await redis_client.close()
+
+@pytest.fixture
+async def test_user(real_client, db_connection):
+    """Create verified test user"""
+    import uuid as uuid_lib
+    unique_id = str(uuid_lib.uuid4())[:8]
+    email = f"test_{unique_id}@example.com"
+    password = "SecurePass123!@#"
+
+    # Register
+    response = await real_client.post(
+        "/api/v1/auth/signup",
+        json={"email": email, "password": password, "organization_name": f"Org{unique_id}"}
+    )
+    assert response.status_code == 201
+    data = response.json()
+    user_id = data["data"]["user_id"]
+
+    # Mark as verified
+    await db_connection.execute(
+        "UPDATE users SET is_verified = TRUE WHERE id = $1",
+        uuid_lib.UUID(user_id)
+    )
+
+    user_data = {
+        "email": email,
+        "password": password,
+        "user_id": user_id,
+        "full_name": f"Test User {unique_id}"
+    }
+
+    yield user_data
+
+    # Cleanup
+    try:
+        await db_connection.execute(
+            "DELETE FROM users WHERE id = $1",
+            uuid_lib.UUID(user_id)
+        )
+    except Exception as e:
+        print(f"Warning: Failed to cleanup test user: {e}")
+
+@pytest.fixture
+async def test_admin_user(real_client, db_connection):
+    """Create admin user"""
+    import uuid as uuid_lib
+    unique_id = str(uuid_lib.uuid4())[:8]
+    email = f"admin_{unique_id}@example.com"
+    password = "AdminPass123!@#"
+
+    # 1. Register a user (without organization name initially)
+    response = await real_client.post(
+        "/api/v1/auth/signup",
+        json={"email": email, "password": password}
+    )
+    assert response.status_code == 201
+    signup_data = response.json()
+    user_id = signup_data["data"]["user_id"]
+
+    # Mark user as verified
+    await db_connection.execute(
+        "UPDATE users SET is_verified = TRUE WHERE id = $1",
+        uuid_lib.UUID(user_id)
+    )
+
+    # 2. Manually create an Organization
+    org_id = uuid_lib.uuid4()
+    org_name = f"AdminOrg_{unique_id}"
+    org_slug = org_name.lower().replace(" ", "-")
+    await db_connection.execute(
+        "INSERT INTO organizations (id, name, slug, created_at) VALUES ($1, $2, $3, NOW())",
+        org_id, org_name, org_slug
+    )
+
+    # 3. Manually create an OrganizationMember for the user with 'admin' role
+    member_id = uuid_lib.uuid4()
+    await db_connection.execute(
+        "INSERT INTO organization_members (id, user_id, org_id, roles, created_at) VALUES ($1, $2, $3, $4, NOW())",
+        member_id, uuid_lib.UUID(user_id), org_id, ["admin"]
+    )
+
+    user_data = {
+        "email": email,
+        "password": password,
+        "user_id": user_id,
+        "org_id": str(org_id), # Store the org_id for later use in tests
+        "roles": ["admin"] # For test logic
+    }
+
+    yield user_data
+
+    # Cleanup
+    try:
+        await db_connection.execute(
+            "DELETE FROM users WHERE id = $1",
+            uuid_lib.UUID(user_id)
+        )
+        await db_connection.execute(
+            "DELETE FROM organizations WHERE id = $1",
+            org_id
+        )
+        await db_connection.execute(
+            "DELETE FROM organization_members WHERE id = $1",
+            member_id
+        )
+    except Exception as e:
+        print(f"Warning: Failed to cleanup admin user: {e}")
+
+@pytest.fixture
+async def user_token(real_client, test_user):
+    """Login and return access token"""
+    response = await real_client.post(
+        "/api/v1/auth/login",
+        json={"email": test_user["email"], "password": test_user["password"]}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    return data["data"]["access_token"]
+
+@pytest.fixture
+async def admin_token(real_client, test_admin_user):
+    """Admin login and return token"""
+    response = await real_client.post(
+        "/api/v1/auth/login",
+        json={"email": test_admin_user["email"], "password": test_admin_user["password"], "org_id": test_admin_user["org_id"]}
+    )
+    assert response.status_code == 200
+    return token
+
+@pytest.fixture
+async def auth_headers(user_token):
+    """Authorization headers with Bearer token"""
+    return {"Authorization": f"Bearer {user_token}"}
+
+@pytest.fixture
+async def admin_headers(admin_token):
+    """Admin authorization headers"""
+    return {"Authorization": f"Bearer {admin_token}"}
+
+@pytest.fixture
+async def user_with_mfa(real_client, test_user, user_token):
+    """User with MFA enabled"""
+    headers = {"Authorization": f"Bearer {user_token}"}
+
+    # Get MFA secret
+    response = await real_client.get("/api/v1/users/mfa/secret", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    mfa_secret = data["data"]["secret"]
+
+    # Generate TOTP (Pure Python RFC 6238)
+    import hmac
+    import struct
+    import time
+    import base64
+
+    def generate_totp(secret: str) -> str:
+        key = base64.b32decode(secret.upper() + '=' * (-len(secret) % 8))
+        counter = int(time.time()) // 30
+        counter_bytes = struct.pack('>Q', counter)
+        hmac_hash = hmac.new(key, counter_bytes, 'sha1').digest()
+        offset = hmac_hash[-1] & 0x0F
+        code = struct.unpack('>I', hmac_hash[offset:offset+4])[0] & 0x7FFFFFFF
+        return str(code % 1000000).zfill(6)
+
+    totp_code = generate_totp(mfa_secret)
+
+    # Enable MFA
+    response = await real_client.post(
+        "/api/v1/users/mfa/enable",
+        headers=headers,
+        json={"totp_code": totp_code}
+    )
+    assert response.status_code == 200
+
+    user_data = {
+        **test_user,
+        "mfa_secret": mfa_secret,
+        "totp_generator": lambda: generate_totp(mfa_secret)
+    }
+
+    yield user_data
+
+@pytest.fixture
+async def cleanup_test_users(db_connection):
+    """Cleanup all test users after test"""
+    yield
+    try:
+        await db_connection.execute(
+            "DELETE FROM users WHERE email LIKE 'test_%@example.com' OR email LIKE 'admin_%@example.com'"
+        )
+    except Exception as e:
+        print(f"Warning: Failed to cleanup test users: {e}")

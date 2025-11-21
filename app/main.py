@@ -77,9 +77,9 @@ async def auth_exception_handler(request: Request, exc: AuthenticationError):
     )
 
 # Include Routers
-app.include_router(auth.router, prefix="/auth", tags=["Auth"])
-app.include_router(users.router, prefix="/users", tags=["Users"])
-app.include_router(admin.router, prefix="/admin", tags=["Admin"])
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
+app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(wellknown.router, prefix="/.well-known", tags=["Discovery"])
 
 @app.get("/health")
