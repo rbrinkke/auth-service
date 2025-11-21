@@ -6,3 +6,4 @@ keys/
 test.db
 coverage.xml
 .pytest_cache/
+venv/
