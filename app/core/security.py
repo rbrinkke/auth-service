@@ -3,6 +3,7 @@ import secrets
 import hashlib
 import base64
 import json
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -80,7 +81,7 @@ def generate_rsa_keypair() -> None:
     private_pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
+        encryption_algorithm=serialization.BestAvailableEncryption(settings.PRIVATE_KEY_PASSWORD.encode())
     )
 
     # Serialize Public Key
@@ -113,7 +114,7 @@ def load_rsa_keys() -> None:
     with open(settings.PRIVATE_KEY_PATH, "rb") as f:
         _PRIVATE_KEY_OBJ = serialization.load_pem_private_key(
             f.read(),
-            password=None,
+            password=settings.PRIVATE_KEY_PASSWORD.encode(),
             backend=default_backend()
         )
 
@@ -240,11 +241,11 @@ def decode_access_token(token: str) -> Dict[str, Any]:
     except jwt.PyJWTError as e:
         raise InvalidTokenError(f"Could not validate credentials: {str(e)}")
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+async def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return await asyncio.to_thread(pwd_context.verify, plain_password, hashed_password)
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+async def hash_password(password: str) -> str:
+    return await asyncio.to_thread(pwd_context.hash, password)
 
 def generate_refresh_token() -> str:
     return secrets.token_urlsafe(64)

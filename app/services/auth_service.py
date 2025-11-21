@@ -42,7 +42,7 @@ class AuthService:
             )
 
         # Hash password
-        hashed_password = security.hash_password(user_in.password)
+        hashed_password = await security.hash_password(user_in.password)
 
         # Create User
         user = User(
@@ -141,7 +141,7 @@ class AuthService:
                 # So resetting here is fine.
 
         # 2. Verify password
-        if not security.verify_password(user_in.password, user.password_hash):
+        if not await security.verify_password(user_in.password, user.password_hash):
             # Handle Incorrect Password
             user.failed_login_attempts += 1
             user.last_failed_login = datetime.now(timezone.utc)
@@ -197,6 +197,18 @@ class AuthService:
         return await self._finalize_login(user, ip_address)
 
     async def verify_mfa(self, session_token: str, totp_code: str, ip_address: str) -> dict:
+        # Rate Limiting
+        rate_limit_key = f"mfa_attempts:{session_token}"
+        attempts = await self.redis.incr(rate_limit_key)
+        if attempts == 1:
+            await self.redis.expire(rate_limit_key, 300) # 5 minutes
+
+        if attempts > 3:
+            # Revoke session
+            await self.redis.delete(f"mfa_session:{session_token}")
+            await self.redis.delete(rate_limit_key)
+            raise InvalidCredentialsError("Too many failed attempts. Session revoked.")
+
         user_id_str = await self.redis.get(f"mfa_session:{session_token}")
         if not user_id_str:
             raise InvalidCredentialsError("Invalid or expired session")
@@ -473,7 +485,7 @@ class AuthService:
             raise InvalidTokenError("User not found")
 
         # Hash new password
-        hashed_password = security.hash_password(new_password)
+        hashed_password = await security.hash_password(new_password)
         user.password_hash = hashed_password
 
         # Revoke all existing refresh tokens
@@ -602,7 +614,7 @@ class AuthService:
             raise HTTPException(status_code=404, detail="User not found")
 
         # Hash new password
-        hashed_password = security.hash_password(new_password)
+        hashed_password = await security.hash_password(new_password)
         user.password_hash = hashed_password
 
         # Revoke all existing refresh tokens
@@ -634,11 +646,11 @@ class AuthService:
 
         if not service_account or not service_account.is_active:
             # Mitigate timing attacks by performing a dummy verification
-            security.verify_password("dummy_password", "$argon2id$v=19$m=65536,t=3,p=4$ZHVtbXlzYWx0$ZHVtbXloYXNo")
+            await security.verify_password("dummy_password", "$argon2id$v=19$m=65536,t=3,p=4$ZHVtbXlzYWx0$ZHVtbXloYXNo")
             raise InvalidCredentialsError("Invalid client_id or client_secret")
 
         # 2. Verify secret
-        if not security.verify_password(client_secret, service_account.client_secret_hash):
+        if not await security.verify_password(client_secret, service_account.client_secret_hash):
             raise InvalidCredentialsError("Invalid client_id or client_secret")
 
         # 3. Scope Validation
