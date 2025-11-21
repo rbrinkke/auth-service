@@ -27,41 +27,24 @@ pwd_context = CryptContext(
     argon2__parallelism=4
 )
 
-# Encryption key for MFA secrets (in real world, load from secure env var, not generated here unless persisted)
-# Since prompt didn't specify where to get the encryption key, I will derive it or use a separate setting.
-# But to be "standalone" and robust, it should be in settings.
-# I will add MFA_ENCRYPTION_KEY to settings or generate one if missing (but that would lose data on restart if not persisted).
-# For this implementation, I will assume settings has it or I'll generate a static one for the demo if missing
-# (NOTE: IN PROD THIS MUST BE A SECRET ENV VAR).
-# I'll add it to settings in next step, for now I'll use a placeholder logic to get it from settings.
-
 _PRIVATE_KEY_OBJ: Optional[rsa.RSAPrivateKey] = None
 _PUBLIC_KEY_OBJ: Optional[rsa.RSAPublicKey] = None
 _PUBLIC_KEY_PEM: Optional[str] = None
 _JWK_SET: Optional[Dict[str, Any]] = None
 _MFA_FERNET: Optional[Fernet] = None
 
-def get_mfa_fernet():
+def get_mfa_fernet() -> Fernet:
+    """
+    Singleton accessor for the Fernet encryption instance.
+    Relies strictly on the environment variable to avoid insecure defaults.
+    """
     global _MFA_FERNET
     if _MFA_FERNET is None:
-        # Ensure we have a key.
-        # If settings.MFA_ENCRYPTION_KEY is not set, we should fail or warn.
-        # For this exercise I will assume a default or derived key if not present,
-        # but robust code should enforce it.
-        # Let's try to use a key derived from the PRIVATE_KEY path hash to be deterministic but "secret-ish"
-        # (Still not best practice, best is explicit ENV var).
-        # I'll update Config to include MFA_ENCRYPTION_KEY.
-        key = getattr(settings, "MFA_ENCRYPTION_KEY", None)
-        if not key:
-             # Fallback for demo/sandbox if not in env
-             # Generate a 32 byte url-safe base64 key
-             key = base64.urlsafe_b64encode(hashlib.sha256(settings.APP_NAME.encode()).digest())
-
+        # UPDATED: Removed fallback. Settings will raise error on startup if key is missing.
         try:
-             _MFA_FERNET = Fernet(key)
-        except Exception:
-             # specific error handling
-             raise RuntimeError("Invalid MFA_ENCRYPTION_KEY")
+             _MFA_FERNET = Fernet(settings.MFA_ENCRYPTION_KEY)
+        except Exception as e:
+             raise RuntimeError(f"Invalid MFA_ENCRYPTION_KEY configuration: {str(e)}")
     return _MFA_FERNET
 
 def encrypt_mfa_secret(secret: str) -> str:
@@ -143,13 +126,11 @@ def load_rsa_keys() -> None:
         )
 
     # Generate JWK
-    # We construct JWK manually from the public key object parameters
     public_numbers = _PUBLIC_KEY_OBJ.public_numbers()
 
     def int_to_base64(value):
         """Convert an integer to a Base64URL-encoded string"""
         value_hex = format(value, 'x')
-        # Ensure even length
         if len(value_hex) % 2 == 1:
             value_hex = '0' + value_hex
         value_bytes = bytes.fromhex(value_hex)
@@ -207,7 +188,6 @@ def create_access_token(
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    # Get kid from current JWK
     jwks = public_key_to_jwk()
     kid = jwks["keys"][0]["kid"]
 
@@ -250,26 +230,20 @@ def decode_access_token(token: str) -> Dict[str, Any]:
         raise InvalidTokenError(f"Could not validate credentials: {str(e)}")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifies a password against a hash."""
     return pwd_context.verify(plain_password, hashed_password)
 
 def hash_password(password: str) -> str:
-    """Hashes a password using Argon2id."""
     return pwd_context.hash(password)
 
 def generate_refresh_token() -> str:
-    """Generates an opaque secure random string."""
     return secrets.token_urlsafe(64)
 
 def hash_refresh_token(token: str) -> str:
-    """Hashes the refresh token using SHA-256."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 def generate_totp_secret() -> str:
-    """Generates a random base32 secret for TOTP."""
     return pyotp.random_base32()
 
 def verify_totp(secret: str, code: str) -> bool:
-    """Verifies a TOTP code."""
     totp = pyotp.TOTP(secret)
     return totp.verify(code, valid_window=1)

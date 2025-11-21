@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     PUBLIC_KEY_PATH: str = "./keys/public_key.pem"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    MFA_ENCRYPTION_KEY: Optional[str] = None # Should be 32 url-safe base64-encoded bytes
+
+    # UPDATED: Strictly required for production security
+    MFA_ENCRYPTION_KEY: str  # 32 byte url-safe base64 encoded key
 
     # Application
     APP_NAME: str = "Enterprise IdP"
