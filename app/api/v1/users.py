@@ -133,12 +133,11 @@ async def delete_user_me(
 ):
     """
     Self-deletion endpoint (GDPR compliance).
-    Performs a 'soft delete' (anonymization) to preserve audit integrity while removing PII.
+    Performs a hard delete of the user object.
+    Cascading rules ensure cleanup of related data (tokens, memberships, codes).
+    Audit logs are preserved (user_id set to NULL via database constraint).
     """
-    import uuid
-    from datetime import datetime
-
-    # Log event before modifying user
+    # Log event before deleting user
     audit = AuditLog(
         event_type="user_deleted",
         user_id=current_user.id,
@@ -147,25 +146,10 @@ async def delete_user_me(
         details={"email": current_user.email}
     )
     db.add(audit)
-
-    # Soft Delete / Anonymize
-    timestamp = int(datetime.utcnow().timestamp())
-    # Anonymize email
-    current_user.email = f"deleted_{timestamp}_{uuid.uuid4()}@deleted.com"
     
-    # Invalidate credentials
-    current_user.password_hash = "deleted_user_invalid_hash"
-    current_user.is_verified = False
-    current_user.mfa_enabled = False
-    current_user.mfa_secret = None
-
-    # Remove associations
-    # Delete refresh tokens
-    await db.execute(delete(RefreshToken).where(RefreshToken.user_id == current_user.id))
+    # Hard delete the user
+    await db.delete(current_user)
     
-    # Remove from organizations
-    await db.execute(delete(OrganizationMember).where(OrganizationMember.user_id == current_user.id))
-
     await db.commit()
 
     return APIResponse(success=True, data={"message": "User deleted successfully."})
