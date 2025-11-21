@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal
 import re
 from uuid import UUID
 from datetime import datetime
@@ -108,13 +108,23 @@ class PasswordResetConfirmRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "Bearer"
     expires_in: int
 
 class MFAResponse(BaseModel):
     mfa_required: bool = True
     session_token: str
+
+class TokenRequest(BaseModel):
+    grant_type: Literal["client_credentials"]
+    client_id: str
+    client_secret: str
+    scope: Optional[str] = None
+
+class ServiceAccountCreate(BaseModel):
+    name: str
+    scopes: List[str]
 
 # User Read Schemas
 class UserRead(BaseModel):

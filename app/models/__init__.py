@@ -116,3 +116,14 @@ class EmailVerificationCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="email_verification_codes")
+
+class ServiceAccount(Base):
+    __tablename__ = "service_accounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    client_secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    scopes: Mapped[List[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())

@@ -7,7 +7,7 @@ from app.schemas.auth import (
     UserCreate, UserLogin, MFAVerify, RefreshRequest,
     LogoutRequest, ForgotPasswordRequest, ResetPasswordRequest,
     EmailVerifyRequest, ResendVerificationRequest, PasswordResetVerifyRequest, PasswordResetConfirmRequest,
-    APIResponse, TokenResponse, MFAResponse
+    APIResponse, TokenResponse, MFAResponse, TokenRequest
 )
 from app.services.auth_service import AuthService
 from app.utils.rate_limiter import limiter
@@ -271,4 +271,25 @@ async def logout_all(
     return APIResponse(
         success=True,
         data={"message": "All sessions logged out successfully"}
+    )
+
+@router.post("/token", response_model=TokenResponse)
+async def get_token(
+    request: Request,
+    response: Response,
+    token_request: TokenRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    OAuth2 Client Credentials Flow for Service Accounts.
+    """
+    # Rate limit: 10 per minute (strict for M2M)
+    await limiter.limit(redis, request.client.host, "token", 10, 60, response)
+
+    service = AuthService(db, redis)
+    return await service.authenticate_service_account(
+        token_request.client_id,
+        token_request.client_secret,
+        token_request.scope
     )

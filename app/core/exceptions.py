@@ -21,3 +21,7 @@ class InvalidTokenError(AuthenticationError):
 class AccountLockedError(AuthenticationError):
     """Account is locked."""
     pass
+
+class InvalidScopesError(AuthenticationError):
+    """Requested scope is invalid."""
+    pass

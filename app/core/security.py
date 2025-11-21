@@ -179,10 +179,11 @@ def create_access_token(
     user_id: str,
     org_id: Optional[str],
     roles: list[str],
-    email: str,
+    email: Optional[str],
     verified: bool,
     expires_delta: Optional[timedelta] = None,
-    scope: Optional[str] = None
+    scope: Optional[str] = None,
+    claims: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Creates a JWT access token using RS256.
@@ -209,6 +210,9 @@ def create_access_token(
     }
     if scope:
         to_encode["scope"] = scope
+
+    if claims:
+        to_encode.update(claims)
 
     encoded_jwt = jwt.encode(
         to_encode,
