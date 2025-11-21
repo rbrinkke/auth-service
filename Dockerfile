@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir .
 
 COPY . .
-
 # Create keys directory and set permissions
 RUN mkdir -p keys && chmod 700 keys
 
@@ -24,4 +23,5 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# UPDATED: Run migrations before starting the server
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
