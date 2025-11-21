@@ -15,21 +15,35 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Lifespan context manager for the application.
+    Handles startup and shutdown events.
+    """
     # Startup
+    # 1. Ensure RSA keys exist and are loaded
     load_rsa_keys()
+
+    # 2. Initialize Redis connection pool
     redis_client.init(settings.REDIS_URL)
+
     yield
+
     # Shutdown
+    # 1. Close Redis connections
     await redis_client.close()
+
+    # 2. Dispose Database engine
     await engine.dispose()
 
 app = FastAPI(
     title=settings.APP_NAME,
     lifespan=lifespan,
-    openapi_url="/api/v1/openapi.json"
+    openapi_url="/api/v1/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# CORS
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -62,7 +76,7 @@ async def auth_exception_handler(request: Request, exc: AuthenticationError):
         }
     )
 
-# Routes
+# Include Routers
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 app.include_router(wellknown.router, prefix="/.well-known", tags=["Discovery"])
 
