@@ -14,6 +14,7 @@ os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.types import TypeDecorator, TEXT, String
+import sqlalchemy.dialects.postgresql
 
 # --- PATCH POSTGRES TYPES FOR SQLITE ---
 import sqlalchemy.dialects.postgresql
@@ -129,15 +130,8 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
     import fakeredis.aioredis
     fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
 
-    # Mock global redis client logic
-    original_init = redis_client.init
-    original_close = redis_client.close
-
-    redis_client.init = MagicMock()
-
     async def dummy_close():
         pass
-    redis_client.close = dummy_close
 
     # Set the client to our fake one
     redis_client._client = fake_redis
@@ -155,8 +149,6 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
 
     # Restore/Cleanup
     redis_client._client = None
-    redis_client.init = original_init
-    redis_client.close = original_close
     await fake_redis.aclose()
 
 @pytest.fixture

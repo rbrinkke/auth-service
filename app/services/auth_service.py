@@ -9,11 +9,11 @@ from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 from redis.asyncio import Redis
 
-from app.models import User, Organization, OrganizationMember, RefreshToken, PasswordResetCode, EmailVerificationCode
+from app.models import User, Organization, OrganizationMember, RefreshToken, PasswordResetCode, EmailVerificationCode, ServiceAccount
 from app.schemas.auth import UserCreate, UserLogin
 from app.core import security
 from app.core.config import settings
-from app.core.exceptions import InvalidCredentialsError, MFARequiredError, AuthenticationError, InvalidTokenError
+from app.core.exceptions import InvalidCredentialsError, MFARequiredError, AuthenticationError, InvalidTokenError, InvalidScopesError
 from app.services.audit_service import log_audit_event
 from app.services.email import get_email_provider
 
@@ -622,3 +622,51 @@ class AuthService:
         await self._revoke_user_tokens(user_id)
         await log_audit_event(self.db, "logout_all_sessions", user_id, ip_address, True)
         await self.db.commit()
+
+    async def authenticate_service_account(self, client_id: str, client_secret: str, requested_scopes: Optional[str]) -> dict:
+        """
+        Authenticate a service account via Client Credentials Flow.
+        """
+        # 1. Fetch ServiceAccount
+        stmt = select(ServiceAccount).where(ServiceAccount.client_id == client_id)
+        result = await self.db.execute(stmt)
+        service_account = result.scalar_one_or_none()
+
+        if not service_account or not service_account.is_active:
+            # Mitigate timing attacks by performing a dummy verification
+            security.verify_password("dummy_password", "$argon2id$v=19$m=65536,t=3,p=4$ZHVtbXlzYWx0$ZHVtbXloYXNo")
+            raise InvalidCredentialsError("Invalid client_id or client_secret")
+
+        # 2. Verify secret
+        if not security.verify_password(client_secret, service_account.client_secret_hash):
+            raise InvalidCredentialsError("Invalid client_id or client_secret")
+
+        # 3. Scope Validation
+        allowed_scopes = set(service_account.scopes)
+
+        if requested_scopes:
+            req_scopes_list = requested_scopes.split()
+            for scope in req_scopes_list:
+                if scope not in allowed_scopes:
+                    raise InvalidScopesError(f"Scope '{scope}' is not allowed for this service account")
+            final_scopes = " ".join(req_scopes_list)
+        else:
+            # Default to all allowed scopes
+            final_scopes = " ".join(service_account.scopes)
+
+        # 4. Generate JWT
+        access_token = security.create_access_token(
+            user_id=str(service_account.client_id), # Use client_id as sub
+            org_id=None,
+            roles=[],
+            email=None,
+            verified=True,
+            scope=final_scopes,
+            claims={"type": "service_account"}
+        )
+
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        }
