@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, Request, status, HTTPException
+from fastapi import APIRouter, Depends, Request, Response, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.api import deps
 from app.schemas.auth import (
     UserCreate, UserLogin, MFAVerify, RefreshRequest,
-    LogoutRequest, SwitchOrgRequest, ForgotPasswordRequest, ResetPasswordRequest,
+    LogoutRequest, ForgotPasswordRequest, ResetPasswordRequest,
     EmailVerifyRequest, ResendVerificationRequest, PasswordResetVerifyRequest, PasswordResetConfirmRequest,
     APIResponse, TokenResponse, MFAResponse
 )
@@ -24,6 +24,7 @@ async def get_redis() -> Redis:
 @router.post("/signup", response_model=APIResponse, status_code=status.HTTP_201_CREATED)
 async def signup(
     request: Request,
+    response: Response,
     user_in: UserCreate,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -32,7 +33,7 @@ async def signup(
     Register a new user account.
     """
     # Rate limit: 3 per hour per IP
-    await limiter.limit(redis, request.client.host, "signup", 3, 3600)
+    await limiter.limit(redis, request.client.host, "signup", 3, 3600, response)
 
     service = AuthService(db, redis)
     user = await service.create_user(user_in, request.client.host)
@@ -49,6 +50,7 @@ async def signup(
 @router.post("/login", response_model=APIResponse)
 async def login(
     request: Request,
+    response: Response,
     user_in: UserLogin,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -57,7 +59,7 @@ async def login(
     Authenticate user. Returns either tokens (200) or MFA requirement (200/202).
     """
     # Rate limit: Defined in settings
-    await limiter.limit(redis, request.client.host, "login", settings.LOGIN_RATE_LIMIT, settings.LOGIN_RATE_WINDOW)
+    await limiter.limit(redis, request.client.host, "login", settings.LOGIN_RATE_LIMIT, settings.LOGIN_RATE_WINDOW, response)
 
     service = AuthService(db, redis)
     result = await service.authenticate_user(user_in, request.client.host)
@@ -95,6 +97,7 @@ async def mfa_verify(
 @router.post("/refresh", response_model=APIResponse)
 async def refresh_token(
     request: Request,
+    response: Response,
     refresh_in: RefreshRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -103,25 +106,10 @@ async def refresh_token(
     Rotate refresh token and issue new access token.
     """
     # Rate limit: 10 per 5 mins
-    await limiter.limit(redis, request.client.host, "refresh", 10, 300)
+    await limiter.limit(redis, request.client.host, "refresh", 10, 300, response)
 
     service = AuthService(db, redis)
     result = await service.refresh_token(refresh_in.refresh_token, request.client.host)
-    return APIResponse(success=True, data=result)
-
-@router.post("/switch-org", response_model=APIResponse)
-async def switch_org(
-    request: Request,
-    switch_in: SwitchOrgRequest,
-    current_user: User = Depends(deps.get_current_user),
-    db: AsyncSession = Depends(deps.get_db),
-    redis: Redis = Depends(get_redis)
-):
-    """
-    Issue new access token scoped to target organization.
-    """
-    service = AuthService(db, redis)
-    result = await service.switch_org(current_user.id, switch_in.target_org_id)
     return APIResponse(success=True, data=result)
 
 @router.post("/logout", response_model=APIResponse)
@@ -141,6 +129,7 @@ async def logout(
 @router.post("/forgot-password", response_model=APIResponse)
 async def forgot_password(
     request: Request,
+    response: Response,
     forgot_in: ForgotPasswordRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -148,7 +137,7 @@ async def forgot_password(
     """
     Initiate password recovery flow.
     """
-    await limiter.limit(redis, request.client.host, "forgot_password", 3, 900) # 3 requests per 15 mins
+    await limiter.limit(redis, request.client.host, "forgot_password", 3, 900, response) # 3 requests per 15 mins
     service = AuthService(db, redis)
     await service.forgot_password(forgot_in.email, request.client.host)
     return APIResponse(
@@ -159,6 +148,7 @@ async def forgot_password(
 @router.post("/reset-password", response_model=APIResponse)
 async def reset_password(
     request: Request,
+    response: Response,
     reset_in: ResetPasswordRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -166,7 +156,7 @@ async def reset_password(
     """
     Complete password reset flow.
     """
-    await limiter.limit(redis, request.client.host, "reset_password", 5, 900)
+    await limiter.limit(redis, request.client.host, "reset_password", 5, 900, response)
     service = AuthService(db, redis)
     await service.reset_password(reset_in.token, reset_in.new_password, request.client.host)
     return APIResponse(
@@ -178,6 +168,7 @@ async def reset_password(
 @router.post("/verify-email", response_model=APIResponse)
 async def verify_email(
     request: Request,
+    response: Response,
     verify_in: EmailVerifyRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -185,7 +176,7 @@ async def verify_email(
     """
     Verify email address with code.
     """
-    await limiter.limit(redis, request.client.host, "verify_email", 5, 900)
+    await limiter.limit(redis, request.client.host, "verify_email", 5, 900, response)
     service = AuthService(db, redis)
     await service.verify_email(verify_in.email, verify_in.code)
     return APIResponse(
@@ -196,6 +187,7 @@ async def verify_email(
 @router.post("/resend-verification", response_model=APIResponse)
 async def resend_verification(
     request: Request,
+    response: Response,
     resend_in: ResendVerificationRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -203,7 +195,7 @@ async def resend_verification(
     """
     Resend email verification code.
     """
-    await limiter.limit(redis, request.client.host, "resend_verification", 3, 900)
+    await limiter.limit(redis, request.client.host, "resend_verification", 3, 900, response)
     service = AuthService(db, redis)
     await service.resend_verification(resend_in.email)
     return APIResponse(
@@ -215,6 +207,7 @@ async def resend_verification(
 @router.post("/password-reset/request", response_model=APIResponse)
 async def password_reset_request(
     request: Request,
+    response: Response,
     forgot_in: ForgotPasswordRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -222,11 +215,12 @@ async def password_reset_request(
     """
     Alias for /forgot-password - Initiate password recovery flow.
     """
-    return await forgot_password(request, forgot_in, db, redis)
+    return await forgot_password(request, response, forgot_in, db, redis)
 
 @router.post("/password-reset/verify", response_model=APIResponse)
 async def password_reset_verify(
     request: Request,
+    response: Response,
     verify_in: PasswordResetVerifyRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -234,7 +228,7 @@ async def password_reset_verify(
     """
     Verify password reset code validity.
     """
-    await limiter.limit(redis, request.client.host, "password_reset_verify", 5, 900)
+    await limiter.limit(redis, request.client.host, "password_reset_verify", 5, 900, response)
     service = AuthService(db, redis)
     await service.verify_reset_code(verify_in.email, verify_in.code)
     return APIResponse(
@@ -245,6 +239,7 @@ async def password_reset_verify(
 @router.post("/password-reset/confirm", response_model=APIResponse)
 async def password_reset_confirm(
     request: Request,
+    response: Response,
     confirm_in: PasswordResetConfirmRequest,
     db: AsyncSession = Depends(deps.get_db),
     redis: Redis = Depends(get_redis)
@@ -252,7 +247,7 @@ async def password_reset_confirm(
     """
     Complete password reset with code (alternative to token-based reset).
     """
-    await limiter.limit(redis, request.client.host, "password_reset_confirm", 5, 900)
+    await limiter.limit(redis, request.client.host, "password_reset_confirm", 5, 900, response)
     service = AuthService(db, redis)
     await service.reset_password_with_code(confirm_in.email, confirm_in.code, confirm_in.new_password, request.client.host)
     return APIResponse(

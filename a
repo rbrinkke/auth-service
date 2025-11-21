@@ -1,209 +1,64 @@
-# Test Status Report - auth-service
-**Date**: 2025-11-21
-**Time**: 12:48 CET
-**Status**: SYSTEMATIC FIX IN PROGRESS
+# TODO: Implementatie & Bugfix Rapport (Auth Service)
 
-## Current Status
+**Datum:** 21 November 2025
+**Status:** 52 Tests Geslaagd, 12 Overgeslagen (Skipped)
+**Doel:** 100% Test Coverage en volledig werkende functionaliteit bereiken.
 
-**Tests Passing**: 2/64 (3%)
-**Tests Failing**: ~40/64 (APIResponse format issue)
-**Tests Error**: ~22/64 (Rate limit + fixture/format issues)
+Hieronder volgen de taken die uitgevoerd moeten worden om de overgeslagen tests te laten slagen.
 
-### What's Working ✅
+## 1. Organisatie Management (Multi-tenancy)
+*Tests overgeslagen omdat endpoints `501 Not Implemented` retourneren.*
 
-1. **Infrastructure**:
-   - Service running at http://localhost:8000
-   - PostgreSQL connected (localhost:5433)
-   - Redis connected (localhost:6380)
-   - All 9 missing endpoints IMPLEMENTED
+De database tabellen (`organizations`, `organization_members`) bestaan, maar de API-logica ontbreekt.
 
-2. **Test Setup**:
-   - pytest + all dependencies installed
-   - All fixtures added to conftest.py
-   - Real integration tests against live service
-   - Pure Python TOTP generator (RFC 6238)
+*   **Bestanden:** `app/api/v1/admin.py`, `app/api/v1/users.py`, `app/services/auth_service.py`
+*   **Te implementeren functionaliteit:**
+    1.  **Create Organization (Admin):** Implementeer `POST /api/v1/admin/organizations`. Moet een nieuwe organisatie in de DB aanmaken.
+    2.  **List User Organizations:** Implementeer `GET /api/v1/users/organizations`. Moet alle organisaties teruggeven waar de ingelogde gebruiker lid van is.
+    3.  **Switch Organization:** Implementeer `POST /api/v1/users/switch-org`.
+        *   Verifieer of de gebruiker lid is van de doel-organisatie.
+        *   Genereer een **nieuw** access token met de `org_id` en bijbehorende `roles` in de claims.
 
-3. **Code Fixes Applied**:
-   - Signup endpoint returns user_id + email
-   - Duplicate email returns HTTP 409 (was 400)
-   - Container rebuilt with --no-cache
+## 2. Bugfixes & Logica Verbeteringen
 
-### Root Cause Analysis
+### A. Admin Self-Ban Preventie
+*Test:* `tests/test_admin.py::TestAdminBanUser::test_admin_cannot_ban_self`
 
-**PRIMARY ISSUE**: APIResponse format mismatch between API and tests.
+*   **Probleem:** Een admin kan momenteel zichzelf bannen (`POST /users/{id}/ban`). Dit kan leiden tot situaties waarin niemand meer toegang heeft.
+*   **Taak:** Voeg een check toe in `app/api/v1/admin.py` (endpoint `ban_user`) om te voorkomen dat `user_id == current_user.id`.
+*   **Gewenst resultaat:** Return HTTP `403 Forbidden` als een admin zichzelf probeert te bannen.
 
-**API Returns** (correct, production format):
-```json
-{
-  "success": true,
-  "data": {
-    "user_id": "...",
-    "email": "..."
-  },
-  "error": null,
-  "timestamp": "2025-11-21T..."
-}
-```
+### B. GDPR Self-Deletion (500 Error)
+*Test:* `tests/test_flows.py::TestGDPRSelfDeletion::test_self_deletion_flow`
 
-**Tests Expect** (incorrect assumption):
-```python
-data = response.json()
-assert "user_id" in data  # ❌ FAILS - user_id is in data["data"]
-```
+*   **Probleem:** `DELETE /api/v1/users/me` crasht met een `500 Internal Server Error`. Waarschijnlijk door *Foreign Key constraints* (bijv. openstaande audit logs, tokens, of organisatie-lidmaatschappen die aan de gebruiker hangen).
+*   **Taak:**
+    *   Debug de 500 error.
+    *   Zorg voor een "soft delete" (anonimiseren van data) OF een correcte "hard delete" met `CASCADE` verwijdering van gerelateerde records.
+    *   Zorg dat tokens direct worden ingetrokken.
 
-**Should Be**:
-```python
-resp = response.json()
-assert resp["success"] is True
-data = resp["data"]
-assert "user_id" in data  # ✅ PASSES
-```
+## 3. Data Persistentie: Wachtwoord Reset & Email Verificatie
+*Tests:* `TestPasswordResetFlow` & `TestEmailVerificationFlow` (meerdere tests)
 
-## Systematic Fix Required
+*   **Probleem:** De tests verwachten dat verificatiecodes worden opgeslagen in de PostgreSQL tabellen `password_reset_codes` en `email_verification_codes`. De huidige implementatie lijkt alleen Redis te gebruiken of genereert alleen tokens zonder ze op te slaan.
+*   **Taak:**
+    *   Update `AuthService.forgot_password`: Sla de gegenereerde code/token op in de tabel `password_reset_codes`.
+    *   Update `AuthService.resend_verification`: Sla de verificatiecode op in de tabel `email_verification_codes`.
+    *   *Alternatief:* Als Redis de *single source of truth* blijft, moeten de tests worden aangepast om in Redis te kijken in plaats van in de SQL database. Echter, voor audit-doeleinden is opslag in SQL aanbevolen.
 
-### Files Needing Updates (All Test Files)
+## 4. HTTP Headers & Security
+*Test:* `tests/test_security.py::TestRateLimiting::test_rate_limit_headers`
 
-1. **tests/test_integration_full.py** (partially fixed)
-   - test_signup_creates_user: ✅ FIXED
-   - test_signup_with_duplicate_email_fails: ✅ FIXED (status code)
-   - Remaining 8 tests: Need APIResponse format fix
+*   **Probleem:** De API retourneert geen headers die de client informeren over de rate limits.
+*   **Taak:** Configureer de rate limiter (of middleware) zodat de volgende headers worden meegestuurd bij elk request (of in ieder geval bij 429 responses):
+    *   `X-RateLimit-Limit`
+    *   `X-RateLimit-Remaining`
+    *   `X-RateLimit-Reset`
 
-2. **tests/test_admin.py** (15 tests)
-   - All need APIResponse format fix
-   - Rate limit cleared
+***
 
-3. **tests/test_security.py** (15 tests)
-   - All need APIResponse format fix
-
-4. **tests/test_flows.py** (15 tests)
-   - All need APIResponse format fix
-
-5. **tests/test_auth.py** (4 tests)
-   - Mixed - some use different assertion style
-
-### Fix Pattern (Apply to ALL Tests)
-
-**Before**:
-```python
-response = await client.post("/api/v1/auth/login", json={...})
-assert response.status_code == 200
-data = response.json()
-assert "access_token" in data
-token = data["access_token"]
-```
-
-**After**:
-```python
-response = await client.post("/api/v1/auth/login", json={...})
-assert response.status_code == 200
-
-resp = response.json()
-assert resp["success"] is True, f"API returned error: {resp.get('error')}"
-assert "data" in resp, "Missing data in response"
-
-data = resp["data"]
-assert "access_token" in data, "Missing access_token"
-token = data["access_token"]
-```
-
-## Path to 100% (CLEAR STEPS)
-
-### Phase 1: Fix Response Handling (ALL Tests)
-
-**Affected Lines**: ~200+ assertions across all test files
-
-**Method 1 - Manual (RECOMMENDED)**:
-1. Update test_integration_full.py (8 remaining tests)
-2. Update test_admin.py (15 tests)
-3. Update test_security.py (15 tests)
-4. Update test_flows.py (15 tests)
-5. Update test_auth.py (4 tests if needed)
-
-**Method 2 - Script (RISKY)**:
-- Use automated script to rewrite all test assertions
-- Risk of breaking working tests
-- Need careful validation
-
-### Phase 2: Handle Additional Issues
-
-1. **Rate Limiting** (SOLVED):
-   - Clear Redis before test runs: `docker exec auth-service-redis-1 redis-cli FLUSHALL`
-   - Done
-
-2. **Organization Endpoints** (EXPECTED):
-   - 2 endpoints return HTTP 501 (Not Implemented)
-   - Tests should handle gracefully
-   - Expected to skip or pass with 501 check
-
-3. **MFA Flow** (NEEDS VALIDATION):
-   - TOTP generator tested and working
-   - May need timing adjustments (30s window)
-
-4. **Token Expiry Tests** (NEEDS VALIDATION):
-   - May need sleeps or time manipulation
-
-### Phase 3: Validate & Repeat
-
-1. **Run ALL tests**: `pytest tests/ -v`
-2. **Achieve 100% pass**: Fix remaining failures
-3. **Run 3x to prove repeatability**:
-   ```bash
-   for i in {1..3}; do
-     docker exec auth-service-redis-1 redis-cli FLUSHALL
-     pytest tests/ -v --tb=short | tee test_run_$i.log
-   done
-   ```
-4. **Generate proof document**: Test output + summary
-
-## Estimate to 100%
-
-**With Manual Fixes**:
-- ~60-90 minutes to systematically fix all test files
-- ~10-15 minutes to validate and rerun
-- ~5 minutes to document and prove repeatability
-- **Total**: 75-110 minutes
-
-**With Script** (if script works):
-- ~10 minutes to validate script output
-- ~10-15 minutes to fix edge cases
-- ~5 minutes to document and prove repeatability
-- **Total**: 25-30 minutes
-
-## Current Test Output Summary
-
-From last run (before fixes):
-```
-collected 64 items
-
-tests/test_admin.py::... ERROR [rate limit]
-tests/test_auth.py::test_jwks PASSED
-tests/test_auth.py::test_signup_login_flow FAILED [format]
-tests/test_flows.py::... FAILED [format]
-tests/test_integration_full.py::test_signup_creates_user PASSED [✅ FIXED]
-tests/test_integration_full.py::... FAILED [format]
-tests/test_security.py::... FAILED [format]
-
-====== 2 passed, ~40 failed, ~22 errors ======
-```
-
-## Confidence Level
-
-**Can achieve 100%**: ✅ YES
-**Issue is systematic**: ✅ YES (same pattern everywhere)
-**Fix is straightforward**: ✅ YES (extract data from response)
-**Infrastructure works**: ✅ YES (service running, endpoints exist)
-**Tests are well-written**: ✅ YES (just wrong assumption about response format)
-
-## Recommended Next Steps
-
-1. **IMMEDIATE**: Systematically fix test_integration_full.py (8 remaining tests)
-2. **NEXT**: Fix test_admin.py, test_flows.py, test_security.py, test_auth.py
-3. **VALIDATE**: Run all tests and fix any remaining edge cases
-4. **PROVE**: Run 3x successfully to prove repeatability
-5. **DOCUMENT**: Generate final proof document with output
-
----
-
-**Standard**: "99% is half werk en half werk is geen werk"
-**Goal**: 100% test pass rate, repeatable, BEST IN CLASS
-**Status**: On track - systematic fix in progress
+### Aanbevolen Volgorde van Uitvoering:
+1.  **Bugfixes (Punt 2):** Snel op te lossen en verhoogt de stabiliteit.
+2.  **Data Persistentie (Punt 3):** Cruciaal voor een betrouwbare user flow.
+3.  **Organisatie Management (Punt 1):** Grote feature, maar essentieel voor multi-tenancy.
+4.  **Headers (Punt 4):** "Nice to have", kan als laatste.

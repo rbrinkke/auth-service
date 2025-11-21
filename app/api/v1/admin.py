@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 
 from app.api import deps
-from app.models import User, AuditLog
-from app.schemas.auth import UserRead, APIResponse, AuditLogRead
+from app.models import User, AuditLog, Organization
+from app.schemas.auth import UserRead, APIResponse, AuditLogRead, OrganizationCreate
 from app.services.audit_service import log_audit_event
 
 router = APIRouter()
@@ -62,6 +62,9 @@ async def ban_user(
 
     Let's stick to `is_verified` as per prompt suggestion to avoid migrations if possible.
     """
+    if user_id == current_user.id:
+        raise HTTPException(status_code=403, detail="Admin cannot ban themselves")
+
     stmt = select(User).where(User.id == user_id)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
@@ -127,16 +130,28 @@ async def get_audit_logs(
 
     return APIResponse(success=True, data=log_data)
 
-@router.post("/organizations", response_model=APIResponse, status_code=status.HTTP_501_NOT_IMPLEMENTED)
+@router.post("/organizations", response_model=APIResponse, status_code=status.HTTP_201_CREATED)
 async def create_organization(
+    org_in: OrganizationCreate,
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.require_role("admin"))
 ):
     """
-    Create new organization - NOT IMPLEMENTED (returns 501).
-    Organization table not yet implemented in database.
+    Create new organization.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Organization management not yet implemented"
-    )
+    slug = org_in.name.lower().strip().replace(" ", "-")
+    
+    # Check duplicate
+    stmt = select(Organization).where(Organization.slug == slug)
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Organization already exists")
+        
+    org = Organization(name=org_in.name.strip(), slug=slug)
+    db.add(org)
+    await db.commit()
+    await db.refresh(org)
+    
+    await log_audit_event(db, "org_created", current_user.id, "admin_action", True, {"org_id": str(org.id), "name": org.name})
+
+    return APIResponse(success=True, data={"id": str(org.id), "name": org.name, "slug": org.slug})

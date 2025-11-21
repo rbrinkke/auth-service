@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 from redis.asyncio import Redis
 
-from app.models import User, Organization, OrganizationMember, RefreshToken
+from app.models import User, Organization, OrganizationMember, RefreshToken, PasswordResetCode, EmailVerificationCode
 from app.schemas.auth import UserCreate, UserLogin
 from app.core import security
 from app.core.config import settings
@@ -52,6 +52,7 @@ class AuthService:
             mfa_secret=security.encrypt_mfa_secret(security.generate_totp_secret()) # Generate encrypted secret initially, even if disabled
         )
         self.db.add(user)
+        await self.db.flush()
 
         # If Org provided
         if user_in.organization_name:
@@ -72,6 +73,21 @@ class AuthService:
             self.db.add(member)
 
         await log_audit_event(self.db, "signup_success", user.id, ip_address, True)
+        
+        # Generate and send verification email
+        verification_code = secrets.randbelow(1000000)
+        code_str = f"{verification_code:06d}"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+        verification_entry = EmailVerificationCode(
+            user_id=user.id,
+            code=code_str,
+            expires_at=expires_at
+        )
+        self.db.add(verification_entry)
+        
+        await self.email_service.send_verification_email(user.email, code_str)
+        
         await self.db.commit()
         await self.db.refresh(user)
         return user
@@ -296,7 +312,7 @@ class AuthService:
         member = result.scalar_one_or_none()
 
         if not member:
-            raise AuthenticationError("Not a member of target organization")
+            raise HTTPException(status_code=403, detail="Not a member of target organization")
 
         # Get user info
         stmt = select(User).where(User.id == user_id)
@@ -347,20 +363,21 @@ class AuthService:
              await self.db.commit()
              return
 
-        # Generate password reset token (short-lived JWT)
-        # Use a special scope for password reset
-        reset_token = security.create_access_token(
-            user_id=str(user.id),
-            org_id=None,
-            roles=[],
-            email=user.email,
-            verified=user.is_verified,
-            expires_delta=timedelta(minutes=15),
-            scope="password_reset"
+        # Generate 6-digit code
+        code = f"{secrets.randbelow(1000000):06d}"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        
+        # Store in DB
+        reset_code_entry = PasswordResetCode(
+            user_id=user.id,
+            code=code,
+            expires_at=expires_at
         )
+        self.db.add(reset_code_entry)
 
-        # Send email
-        await self.email_service.send_password_reset_email(user.email, reset_token)
+        # Send email (passing code as token)
+        # Note: Ideally we'd send a link AND a code, but here we use code as the token for the link
+        await self.email_service.send_password_reset_email(user.email, code)
 
         await log_audit_event(self.db, "forgot_password_initiated", user.id, ip_address, True)
         await self.db.commit()
@@ -402,17 +419,7 @@ class AuthService:
         """
         Verify email address with verification code.
         """
-        # Get verification code from Redis
-        redis_key = f"email_verification:{email}"
-        stored_code = await self.redis.get(redis_key)
-
-        if not stored_code or stored_code != code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid or expired verification code"
-            )
-
-        # Find user by email
+        # Find user first
         stmt = select(User).where(User.email == email)
         result = await self.db.execute(stmt)
         user = result.scalar_one_or_none()
@@ -420,12 +427,29 @@ class AuthService:
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
+        # Check DB for code
+        stmt = select(EmailVerificationCode).where(
+            EmailVerificationCode.user_id == user.id,
+            EmailVerificationCode.code == code,
+            EmailVerificationCode.expires_at > datetime.now(timezone.utc)
+        )
+        result = await self.db.execute(stmt)
+        verification_entry = result.scalar_one_or_none()
+
+        if not verification_entry:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired verification code"
+            )
+
         # Mark as verified
         user.is_verified = True
+        
+        # Delete all verification codes for this user
+        stmt = delete(EmailVerificationCode).where(EmailVerificationCode.user_id == user.id)
+        await self.db.execute(stmt)
+        
         await self.db.commit()
-
-        # Delete verification code from Redis
-        await self.redis.delete(redis_key)
 
         await log_audit_event(self.db, "email_verified", user.id, "system", True)
 
@@ -447,27 +471,46 @@ class AuthService:
             return
 
         # Generate new verification code
-        import secrets
         verification_code = secrets.randbelow(1000000)
         code_str = f"{verification_code:06d}"
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
 
-        # Store in Redis with 15 min expiry
-        redis_key = f"email_verification:{email}"
-        await self.redis.setex(redis_key, 900, code_str)
+        # Store in DB
+        verification_entry = EmailVerificationCode(
+            user_id=user.id,
+            code=code_str,
+            expires_at=expires_at
+        )
+        self.db.add(verification_entry)
 
         # Send email
         await self.email_service.send_verification_email(user.email, code_str)
 
         await log_audit_event(self.db, "verification_email_resent", user.id, "system", True)
+        await self.db.commit()
 
     async def verify_reset_code(self, email: str, code: str):
         """
         Verify password reset code validity (without resetting password).
         """
-        redis_key = f"password_reset:{email}"
-        stored_code = await self.redis.get(redis_key)
+        # Find user first
+        stmt = select(User).where(User.email == email)
+        result = await self.db.execute(stmt)
+        user = result.scalar_one_or_none()
 
-        if not stored_code or stored_code != code:
+        if not user:
+             raise HTTPException(status_code=400, detail="Invalid email or code")
+
+        # Check DB for code
+        stmt = select(PasswordResetCode).where(
+            PasswordResetCode.user_id == user.id,
+            PasswordResetCode.code == code,
+            PasswordResetCode.expires_at > datetime.now(timezone.utc)
+        )
+        result = await self.db.execute(stmt)
+        reset_code_entry = result.scalar_one_or_none()
+
+        if not reset_code_entry:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or expired reset code"
@@ -480,10 +523,10 @@ class AuthService:
         """
         Reset password using email + code instead of token.
         """
-        # Verify code first
+        # Verify code (and get user implicitly, but we need user obj)
         await self.verify_reset_code(email, code)
 
-        # Find user
+        # Find user (again, optimized: verify_reset_code could return user/entry but keeping signature simple)
         stmt = select(User).where(User.email == email)
         result = await self.db.execute(stmt)
         user = result.scalar_one_or_none()
@@ -498,9 +541,9 @@ class AuthService:
         # Revoke all existing refresh tokens
         await self._revoke_user_tokens(user.id)
 
-        # Delete reset code from Redis
-        redis_key = f"password_reset:{email}"
-        await self.redis.delete(redis_key)
+        # Delete ALL reset codes for this user (security: consume the code)
+        stmt = delete(PasswordResetCode).where(PasswordResetCode.user_id == user.id)
+        await self.db.execute(stmt)
 
         await log_audit_event(self.db, "password_reset_success", user.id, ip_address, True)
         await self.db.commit()

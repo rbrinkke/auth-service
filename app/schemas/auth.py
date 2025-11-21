@@ -35,6 +35,9 @@ class UserCreate(BaseModel):
             raise ValueError('Password must contain at least one special character')
         return v
 
+class OrganizationCreate(BaseModel):
+    name: str = Field(..., min_length=3, max_length=50)
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str

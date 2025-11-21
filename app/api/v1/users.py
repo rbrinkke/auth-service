@@ -1,14 +1,36 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete
 import pyotp
+from redis.asyncio import Redis
 
 from app.api import deps
-from app.schemas.auth import UserRead, APIResponse
-from app.models import User, AuditLog
+from app.schemas.auth import UserRead, APIResponse, SwitchOrgRequest
+from app.models import User, AuditLog, OrganizationMember, RefreshToken
 from app.core.security import decrypt_mfa_secret, encrypt_mfa_secret
 from app.core.config import settings
+from app.services.auth_service import AuthService
+from app.core.redis import redis_client
 
 router = APIRouter()
+
+async def get_redis() -> Redis:
+    return redis_client.get_client()
+
+@router.post("/switch-org", response_model=APIResponse)
+async def switch_org(
+    request: Request,
+    switch_in: SwitchOrgRequest,
+    current_user: User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Issue new access token scoped to target organization.
+    """
+    service = AuthService(db, redis)
+    result = await service.switch_org(current_user.id, switch_in.target_org_id)
+    return APIResponse(success=True, data=result)
 
 @router.get("/me", response_model=APIResponse)
 async def read_users_me(
@@ -81,18 +103,27 @@ async def enable_mfa(
     return APIResponse(success=True, data={"message": "MFA enabled successfully."})
 
 
-@router.get("/organizations", response_model=APIResponse, status_code=status.HTTP_501_NOT_IMPLEMENTED)
+@router.get("/organizations", response_model=APIResponse)
 async def list_user_organizations(
     current_user: User = Depends(deps.get_current_user),
+    db: AsyncSession = Depends(deps.get_db),
 ):
     """
-    List user's organizations - NOT IMPLEMENTED (returns 501).
-    Organization table not yet implemented in database.
+    List user's organizations.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Organization management not yet implemented"
-    )
+    from app.models import Organization
+    from sqlalchemy import select
+    
+    stmt = select(Organization).join(OrganizationMember).where(OrganizationMember.user_id == current_user.id)
+    result = await db.execute(stmt)
+    orgs = result.scalars().all()
+    
+    data = [
+        {"id": str(org.id), "name": org.name, "slug": org.slug}
+        for org in orgs
+    ]
+    
+    return APIResponse(success=True, data={"organizations": data})
 
 @router.delete("/me", response_model=APIResponse)
 async def delete_user_me(
@@ -102,8 +133,12 @@ async def delete_user_me(
 ):
     """
     Self-deletion endpoint (GDPR compliance).
+    Performs a 'soft delete' (anonymization) to preserve audit integrity while removing PII.
     """
-    # Log event
+    import uuid
+    from datetime import datetime
+
+    # Log event before modifying user
     audit = AuditLog(
         event_type="user_deleted",
         user_id=current_user.id,
@@ -113,10 +148,24 @@ async def delete_user_me(
     )
     db.add(audit)
 
-    # Delete user
-    # Relationships (RefreshToken, OrganizationMember) are CASCADE.
-    # AuditLog is SET NULL.
-    await db.delete(current_user)
+    # Soft Delete / Anonymize
+    timestamp = int(datetime.utcnow().timestamp())
+    # Anonymize email
+    current_user.email = f"deleted_{timestamp}_{uuid.uuid4()}@deleted.com"
+    
+    # Invalidate credentials
+    current_user.password_hash = "deleted_user_invalid_hash"
+    current_user.is_verified = False
+    current_user.mfa_enabled = False
+    current_user.mfa_secret = None
+
+    # Remove associations
+    # Delete refresh tokens
+    await db.execute(delete(RefreshToken).where(RefreshToken.user_id == current_user.id))
+    
+    # Remove from organizations
+    await db.execute(delete(OrganizationMember).where(OrganizationMember.user_id == current_user.id))
+
     await db.commit()
 
     return APIResponse(success=True, data={"message": "User deleted successfully."})

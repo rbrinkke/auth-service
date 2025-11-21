@@ -376,9 +376,6 @@ class TestLogoutFlow:
         print("✅ Logout all devices working")
 
 
-@pytest.mark.skip(reason="Organization management not fully implemented")
-
-@pytest.mark.skip(reason="Organization management not fully implemented")
 class TestOrganizationSwitching:
     """Test organization context switching (multi-tenancy)."""
     @pytest.mark.asyncio
@@ -419,7 +416,7 @@ class TestOrganizationSwitching:
         switch_response = await real_client.post(
             "/api/v1/users/switch-org",
             headers=auth_headers,
-            json={"organization_id": target_org["id"]}
+            json={"target_org_id": target_org["id"]}
         )
 
         assert switch_response.status_code == 200, f"Failed: {switch_response.text}"
@@ -463,7 +460,7 @@ class TestOrganizationSwitching:
         response = await real_client.post(
             "/api/v1/users/switch-org",
             headers=auth_headers,
-            json={"organization_id": fake_org_id}
+            json={"target_org_id": fake_org_id}
         )
 
         # If not implemented, skip test
@@ -476,9 +473,6 @@ class TestOrganizationSwitching:
         print("✅ Organization access control working")
 
 
-@pytest.mark.skip(reason="API bug: Self-deletion returns 500 Internal Server Error")
-
-@pytest.mark.skip(reason="API bug: Self-deletion returns 500 Internal Server Error")
 class TestGDPRSelfDeletion:
     """Test GDPR-compliant self-deletion flow."""
     @pytest.mark.asyncio
