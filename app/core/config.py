@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Security
     PRIVATE_KEY_PATH: str = "./keys/private_key.pem"
     PUBLIC_KEY_PATH: str = "./keys/public_key.pem"
+    PRIVATE_KEY_PASSWORD: str  # Required for production security
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 

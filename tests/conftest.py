@@ -168,7 +168,7 @@ async def user_factory(db_session):
     async def _create_user(email="test@example.com", password="password", is_verified=True):
         user = User(
             email=email,
-            password_hash=hash_password(password),
+            password_hash=await hash_password(password),
             is_verified=is_verified,
             mfa_enabled=False
         )

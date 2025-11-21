@@ -24,7 +24,7 @@ async def create_service_account(name: str, scopes: list[str]):
             client_secret = secrets.token_urlsafe(32)
 
             # Hash secret
-            secret_hash = hash_password(client_secret)
+            secret_hash = await hash_password(client_secret)
 
             # Create record
             service_account = ServiceAccount(

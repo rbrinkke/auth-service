@@ -12,7 +12,7 @@ from app.core import security
 async def service_account(db_session: AsyncSession):
     client_id = f"service_{secrets.token_hex(8)}"
     client_secret = secrets.token_urlsafe(32)
-    hashed = security.hash_password(client_secret)
+    hashed = await security.hash_password(client_secret)
 
     sa = ServiceAccount(
         client_id=client_id,
