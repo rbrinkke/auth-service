@@ -77,6 +77,7 @@ class AuditLog(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    # Ensure SET NULL on user deletion to preserve history
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     ip_address: Mapped[str] = mapped_column(String(45), nullable=False)  # IPv6 length
     success: Mapped[bool] = mapped_column(Boolean, nullable=False)
