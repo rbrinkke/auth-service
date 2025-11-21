@@ -1,0 +1,957 @@
+
+Act as a Senior Backend Security Architect and Lead Python Engineer. Your task is to scaffold and implement a production-ready, high-security Identity Provider (IdP) microservice.
+
+This is a critical infrastructure component. Do not use placeholders. Write robust, typed, and documented code.
+
+### 1. Project Specification
+**Goal:** Build a standalone Authentication Microservice (Single Source of Truth).
+**Philosophy:** Standalone service using RS256 signatures so other microservices can verify JWTs without DB access.
+**Stack:**
+- **Language:** Python 3.11+
+- **Framework:** FastAPI (Async)
+- **Database:** PostgreSQL (via SQLAlchemy 2.0 Async + asyncpg)
+- **Cache:** Redis (via redis-py async)
+- **Security:** Passlib (Argon2id), PyJWT (RS256)
+
+### 2. Database Schema (PostgreSQL)
+Implement the following models using SQLAlchemy Declarative Base:
+1.  **Users:** `id` (UUID), `email` (unique), `password_hash`, `is_verified`, `mfa_enabled`, `mfa_secret` (encrypted).
+2.  **Organizations:** `id` (UUID), `name`, `slug` (unique).
+3.  **OrganizationMembers:** Junction table linking Users and Orgs with a `roles` column (Array of Strings). Constraint: Unique (user_id, org_id).
+4.  **RefreshTokens:** `token_hash` (PK), `user_id`, `org_id`, `expires_at`, `revoked` (bool), `device_info` (JSONB).
+5.  **AuditLogs:** Immutable logs of auth events.
+
+### 3. Core Security Architecture (The "Must-Haves")
+- **Cryptography:**
+    - Use **RS256** for Access Tokens (JWT).
+    - On startup: Check for `private_key.pem` / `public_key.pem`. If missing, generate 2048-bit RSA keys and save them.
+    - Expose public key via `GET /.well-known/jwks.json` (Standard JWK format).
+- **Password Hashing:** exclusively Argon2id.
+- **Refresh Tokens:** Opaque (random string), hashed in DB. Implements specific rotation logic.
+- **Rate Limiting:** Use Redis to rate limit `/auth/login`.
+
+### 4. API Requirements
+Implement these endpoints in a modular router structure:
+- `GET /.well-known/jwks.json` (Public JWKS)
+- `POST /auth/signup` (Create user)
+- `POST /auth/login` (Returns 200 with tokens OR 202 if MFA required)
+- `POST /auth/mfa/verify` (Finalizes login if MFA is on)
+- `POST /auth/refresh` (Rotates refresh token, issues new JWT)
+- `POST /auth/switch-org` (Issues new JWT scoped to target Org)
+- `POST /auth/logout` (Revokes token)
+
+### 5. Required File Structure & Implementation Details
+Please organize the code using a Clean Architecture approach. Generate the following files:
+
+1.  `app/core/config.py`: Pydantic BaseSettings (loading RSA keys, DB URLs).
+2.  `app/core/security.py`: Utilities for Argon2id, JWT generation (RS256), and TOTP.
+3.  `app/db/session.py`: Async SQLAlchemy engine setup.
+4.  `app/models/`: SQLAlchemy models.
+5.  `app/schemas/`: Pydantic V2 models for request/response validation.
+6.  `app/api/`: Routes separated by concern.
+7.  **Startup Script:** A function in `main.py` or `lifespan` to ensure RSA keys exist.
+
+**Critical Instructions for the AI:**
+- Use **Dependency Injection** for DB sessions and Current User retrieval.
+- Ensure all Pydantic models utilize `ConfigDict(from_attributes=True)`.
+- Include clear comments explaining the **Security Logic** (why we rotate tokens, why we hash refresh tokens).
+- Do not skip the **JWKS endpoint logic**; convert the PEM public key to JWK JSON format dynamically.
+
+Begin implementation.
+Technical Specification: Enterprise Identity Provider (IdP) Service
+Project Objective
+Build a high-security, standalone authentication microservice that serves as the Single Source of Truth for user identities and access rights.
+Role: Identity Provider (IdP) & Authorization Server
+Standards: Implement OAuth 2.0 and OpenID Connect (OIDC) principles
+Integration Philosophy: Resource microservices trust this service through cryptographic verification (JWT) without direct database coupling.
+Tech Stack & Infrastructure
+Language/Framework: Python 3.11+ with FastAPI for async performance and automatic OpenAPI documentation.
+Database: PostgreSQL with asyncpg driver. Chosen for robustness, relational integrity for RBAC, and proven security track record.
+Caching & State Management: Redis for rate limiting, temporary verification codes (2FA/Email), and token blacklisting.
+Containerization: Docker & Docker Compose.
+Database Design (PostgreSQL Schema)
+Design must support multi-tenancy (organization-based) with strict relational integrity.
+Core Tables
+users
+
+id (UUID, PK): Unique identifier
+email (VARCHAR, Unique, Indexed): Login identifier
+password_hash (VARCHAR): Argon2id hash
+is_verified (BOOLEAN): Email verification status
+mfa_enabled (BOOLEAN): Whether 2FA is enabled
+mfa_secret (VARCHAR, Encrypted): TOTP secret key
+
+organizations
+
+id (UUID, PK)
+name (VARCHAR)
+slug (VARCHAR, Unique): URL-friendly reference
+
+organization_members (Junction table)
+
+user_id (FK → users.id)
+org_id (FK → organizations.id)
+roles (ARRAY of VARCHAR or FK to roles table): User's roles within this organization (e.g., ['admin', 'editor'])
+Constraint: Unique pair (user_id, org_id)
+
+refresh_tokens
+
+token_hash (VARCHAR, PK or Indexed): Hash of opaque token string
+user_id (FK → users.id)
+org_id (FK → organizations.id): Session context
+expires_at (TIMESTAMP)
+revoked (BOOLEAN): For "log out all devices" functionality
+device_info (JSONB): User-Agent, IP for security audits
+
+audit_logs
+
+Immutable log of events (login_success, login_failed, password_change, token_revoked) with IP addresses and timestamps
+
+Token Strategy & Cryptography (Critical)
+This is what makes the service truly standalone.
+Signing Mechanism
+Use Asymmetric Encryption (RS256) instead of Symmetric (HS256). The IdP owns the Private Key (to sign tokens). The IdP publishes the Public Key (so other services can verify tokens).
+Token Types
+Access Token (JWT)
+
+Lifetime: Short (e.g., 15 minutes)
+Claims:
+
+json{
+  "iss": "https://idp.yourdomain.com",
+  "sub": "user_uuid",
+  "exp": 1700000000,
+  "iat": 1690000000,
+  "jti": "unique_token_id",
+  "org_id": "active_org_uuid",
+  "roles": ["admin", "finance"]
+}
+Refresh Token (Opaque)
+
+Lifetime: Long (e.g., 7 days, sliding window)
+Format: Random cryptographic string (not JWT), stored in database
+
+API Endpoint Specifications
+Group A: Discovery (Public)
+GET /.well-known/jwks.json
+
+Returns Public Keys (JWK set). Other microservices cache this to validate tokens locally.
+
+Group B: Authentication
+POST /auth/login
+
+Input: Email, Password
+Logic: Verify credentials. If 2FA enabled → return 2fa_required error + temporary session token
+
+POST /auth/mfa/challenge (if applicable)
+
+Input: TOTP Code + Temporary Session Token
+
+POST /auth/token (Token issuance)
+
+Output: Access Token + Refresh Token
+
+Group C: Session Management
+POST /auth/refresh
+
+Input: Refresh Token
+Logic: Validate token in DB, check user/org still active, rotate refresh token (security best practice), issue new Access Token
+
+POST /auth/logout
+
+Input: Refresh Token
+Logic: Mark token as revoked in DB
+
+Group D: Organization Context
+POST /auth/switch-org
+
+Input: Current Access Token + Target org_id
+Logic: Verify user is member of target org. If yes, issue new Access Token with new org_id and corresponding roles
+
+Security Requirements (Non-negotiable)
+Password Storage: Use exclusively Argon2id with unique salts.
+Rate Limiting: Implement strict rate limits (via Redis) on /login and /refresh endpoints to prevent brute-force and DDoS attacks.
+Security Headers: All responses must include security headers (HSTS, X-Content-Type-Options, etc.).
+No Business Logic: This service performs NO business validation (such as "may this user view an invoice?"). It only states "This is User X, who is Admin in Org Y". The invoice service decides the rest.
+Developer Instructions
+Initialization: Ensure a script checks on startup whether an RSA keypair exists. If not, generate one and store the Private Key securely (Environment Variable or Secrets Manager).
+Migration: Use existing app/models as foundation, but refactor auth_service.py to rebuild JWT generation using RS256.
+Validation: Write integration tests proving that tokens generated by the IdP can be successfully verified by an external "dummy" service that only possesses the Public Key.RetryRBAct as a Senior Backend Security Architect and Lead Python Engineer. Your task is to scaffold and implement a production-ready, high-security Identity Provider (IdP) microservice.
+This is a critical infrastructure component. Do not use placeholders. Write robust, typed, and documented code.
+### 1. Project Specification
+**Goal:** Build a standalone Authentication Microservice (Single Source of Truth).
+**Philosophy:** Standalone service using RS256 signatures so other microservices can verify JWTs without DB access.
+**Stack:**
+- **Language:** Python 3.11+
+- **Framework:** FastAPI (Async)
+- **Database:** PostgreSQL (via SQLAlchemy 2.0 Async + asyncpg)
+- **Cache:** Redis (via redis-py async)
+- **Security:** Passlib (Argon2id), PyJWT (RS256)
+### 2. Database Schema (PostgreSQL)
+Implement the following models using SQLAlchemy Declarative Base:
+1.  **Users:** id (UUID), email (unique), password_hash, is_verified, mfa_enabled, mfa_secret (encrypted).
+2.  **Organizations:** id (UUID), name, slug (unique).
+3.  **OrganizationMembers:** Junction table linking Users and Orgs with a roles column (Array of Strings). Constraint: Unique (user_id, org_id).
+4.  **RefreshTokens:** token_hash (PK), user_id, org_id, expires_at, revoked (bool), device_info (JSONB).
+5.  **AuditLogs:** Immutable logs of auth events.
+### 3. Core Security Architecture (The "Must-Haves")
+- **Cryptography:**
+    - Use **RS256** for Access Tokens (JWT).
+    - On startup: Check for private_key.pem / public_key.pem. If missing, generate 2048-bit RSA keys and save them.
+    - Expose public key via GET /.well-known/jwks.json (Standard JWK format).
+- **Password Hashing:** exclusively Argon2id.
+- **Refresh Tokens:** Opaque (random string), hashed in DB. Implements specific rotation logic.
+- **Rate Limiting:** Use Redis to rate limit /auth/login.
+### 4. API Requirements
+Implement these endpoints in a modular router structure:
+- GET /.well-known/jwks.json (Public JWKS)
+- POST /auth/signup (Create user)
+- POST /auth/login (Returns 200 with tokens OR 202 if MFA required)
+- POST /auth/mfa/verify (Finalizes login if MFA is on)
+- POST /auth/refresh (Rotates refresh token, issues new JWT)
+- POST /auth/switch-org (Issues new JWT scoped to target Org)
+- POST /auth/logout (Revokes token)
+### 5. Required File Structure & Implementation Details
+Please organize the code using a Clean Architecture approach. Generate the following files:
+1.  app/core/config.py: Pydantic BaseSettings (loading RSA keys, DB URLs).
+2.  app/core/security.py: Utilities for Argon2id, JWT generation (RS256), and TOTP.
+3.  app/db/session.py: Async SQLAlchemy engine setup.
+4.  app/models/: SQLAlchemy models.
+5.  app/schemas/: Pydantic V2 models for request/response validation.
+6.  app/api/: Routes separated by concern.
+7.  **Startup Script:** A function in main.py or lifespan to ensure RSA keys exist.
+**Critical Instructions for the AI:**
+- Use **Dependency Injection** for DB sessions and Current User retrieval.
+- Ensure all Pydantic models utilize ConfigDict(from_attributes=True).
+- Include clear comments explaining the **Security Logic** (why we rotate tokens, why we hash refresh tokens).
+- Do not skip the **JWKS endpoint logic**; convert the PEM public key to JWK JSON format dynamically.
+Begin implementation. Kan je de prompt beoordelen kunnen we meer structuren aangeven hoe zorgen we dat de code in basis de best in the class isShow moreAnalyzed prompt weaknesses and architected comprehensive improvements systematically.18sRob vraagt me om de prompt te beoordelen en te verbeteren zodat we "best-in-class" code krijgen van een AI-programmeur. Dit is een cruciale vraag - hij wil dat de instructies zo precies zijn dat de AI geen shortcuts neemt of placeholders gebruikt.
+Laat me de huidige prompt analyseren:
+Sterke punten:
+
+Duidelijke architectuur (RS256, standalone IdP)
+Concrete tech stack
+Database schema gespecificeerd
+Security requirements genoemd
+File structure gevraagd
+
+Zwakke punten/verbeterpunten:
+
+Geen expliciete error handling strategie
+Geen transactie management specificaties
+Geen testing requirements
+Geen logging/observability requirements
+Geen specifieke type hints enforcement
+Geen concrete examples van verwachte responses
+Geen security best practices voor headers
+Geen CORS configuratie
+Geen health checks
+Geen graceful shutdown
+Geen connection pooling specs
+Geen migration strategie
+Geen specifieke async patterns (geen blocking calls)
+Geen specifieke validatie rules
+Geen rate limiting implementatie details
+Geen token rotation strategie details
+
+Rob zou waarderen:
+
+Concrete constraints en rules
+Geen ruimte voor interpretatie
+Security-first approach
+Database-first philosophy (zijn stijl)
+Clean Architecture maar met zijn visie erop
+Expliciete "do's and don'ts"
+
+Ik ga de prompt herstructureren met:
+
+Stricter enforcement rules
+Concrete examples
+"Forbidden patterns" sectie
+Testing requirements
+Observability requirements
+Specific async patterns
+Error handling strategy
+Transaction boundaries
+Security checklists
+Excellent question. Let me restructure this into a truly enforceable, best-in-class prompt that leaves no room for shortcuts:
+
+SENIOR BACKEND SECURITY ARCHITECT: Enterprise IdP Implementation
+META-INSTRUCTION: Code Quality Enforcement
+YOU MUST:
+
+Write production-ready code with zero placeholders (no # TODO, no pass, no ...)
+Include comprehensive type hints on every function (Python 3.11+ syntax)
+Add docstrings (Google style) to all public functions explaining security implications
+Use explicit error handling - never use bare except:
+Follow async-first patterns - no blocking I/O operations
+
+YOU MUST NOT:
+
+Use Any type hints (use proper Union/Optional types)
+Create circular imports
+Mix sync and async code
+Store secrets in code or config files (use environment variables)
+Skip input validation on any endpoint
+
+
+1. PROJECT SPECIFICATION
+1.1 Architectural Constraints
+Standalone Philosophy:
+
+Other services verify JWTs using only the public key (no database coupling)
+This service is the sole authority for authentication state
+No business logic beyond identity and authorization
+
+Tech Stack (Non-negotiable):
+Python 3.11+
+FastAPI 0.104+
+SQLAlchemy 2.0+ (Async)
+asyncpg (PostgreSQL driver)
+redis[asyncio] 5.0+
+pydantic 2.0+
+pydantic-settings
+python-jose[cryptography] (for JWKS)
+passlib[argon2]
+pyotp (for TOTP)
+cryptography (for RSA key generation)
+
+2. DATABASE SCHEMA (PostgreSQL)
+2.1 Required Models
+Critical Constraints:
+
+All primary keys: UUID (use uuid.uuid4() as default)
+All timestamps: TIMESTAMP WITH TIME ZONE
+Foreign keys: ON DELETE CASCADE where appropriate
+Indexes: Add explicit indexes on all foreign keys and frequently queried fields
+
+python# Example structure (implement fully):
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_verified: Mapped[bool] = mapped_column(default=False)
+    mfa_enabled: Mapped[bool] = mapped_column(default=False)
+    mfa_secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
+Implement:
+
+User model as above
+Organization model (id, name, slug, created_at)
+OrganizationMember junction table with:
+
+user_id FK → users.id (ON DELETE CASCADE)
+org_id FK → organizations.id (ON DELETE CASCADE)
+roles as PostgreSQL ARRAY type
+Unique constraint on (user_id, org_id)
+
+
+RefreshToken model:
+
+token_hash as VARCHAR(128) PRIMARY KEY
+Use SHA-256 hash of the actual token
+device_info as JSONB
+
+
+AuditLog model (append-only):
+
+event_type ENUM ('login_success', 'login_failed', 'logout', etc.)
+ip_address INET type
+Never allow updates or deletes
+
+
+
+2.2 Migration Strategy
+
+Include Alembic setup with initial migration
+Migration must be idempotent
+Include alembic.ini and env.py configured for async
+
+
+3. SECURITY ARCHITECTURE (CRITICAL)
+3.1 RSA Key Management
+Startup Requirement:
+python# On application startup, lifespan event must:
+1. Check if RSA keypair exists at paths specified in config
+2. If missing:
+   - Generate 2048-bit RSA keypair using cryptography library
+   - Save private_key.pem (PEM format, PKCS8)
+   - Save public_key.pem (PEM format, SubjectPublicKeyInfo)
+   - Set file permissions: 0600 for private, 0644 for public
+3. Load keys into memory
+4. Generate JWK representation of public key (cache in memory)
+Implementation Rule:
+
+Private key must never be exposed via API
+Public key exposed only via /.well-known/jwks.json in JWK format
+
+3.2 JWT Structure (Access Token)
+REQUIRED Claims:
+json{
+  "iss": "https://idp.yourdomain.com",
+  "sub": "<user_uuid>",
+  "exp": "<15_minutes_from_now>",
+  "iat": "<current_timestamp>",
+  "jti": "<unique_token_id>",
+  "org_id": "<active_org_uuid>",
+  "roles": ["admin", "member"],
+  "email": "<user_email>",
+  "verified": true
+}
+```
+
+**Encoding:**
+- Algorithm: RS256
+- No symmetric fallback allowed
+- Include `kid` (key ID) in JWT header
+
+### 3.3 Refresh Token Strategy
+
+**Format:** 
+- 64-byte random token (use `secrets.token_urlsafe(64)`)
+- Store SHA-256 hash in database (never plaintext)
+
+**Rotation Logic (Critical):**
+```
+On /auth/refresh:
+1. Validate provided refresh token hash exists in DB
+2. Check expiration and revocation status
+3. Generate NEW refresh token
+4. Delete OLD refresh token from DB (within same transaction)
+5. Insert NEW refresh token
+6. Return new access token + new refresh token
+7. If any step fails, rollback transaction
+Security Rationale:
+
+Prevents token replay attacks
+Limits blast radius if token is compromised
+Sliding window approach (extends session on use)
+
+3.4 Password Security
+Hashing:
+pythonfrom passlib.context import CryptContext
+
+pwd_context = CryptContext(
+    schemes=["argon2"],
+    deprecated="auto",
+    argon2__memory_cost=65536,  # 64 MB
+    argon2__time_cost=3,
+    argon2__parallelism=4
+)
+Rules:
+
+Verify password before any other logic (prevents timing attacks)
+Use constant-time comparison for all security tokens
+
+3.5 Rate Limiting (Redis Implementation)
+Required Limits:
+
+/auth/login: 5 attempts per 15 minutes per IP
+/auth/refresh: 10 attempts per 5 minutes per token
+/auth/signup: 3 attempts per hour per IP
+
+Implementation Pattern:
+python# Use Redis with sliding window algorithm
+key = f"ratelimit:{endpoint}:{identifier}"
+current = await redis.incr(key)
+if current == 1:
+    await redis.expire(key, window_seconds)
+if current > limit:
+    raise HTTPException(429, "Rate limit exceeded")
+
+4. API ENDPOINT SPECIFICATIONS
+4.1 Response Standards
+ALL responses must follow:
+python# Success Response
+{
+    "success": true,
+    "data": { ... },
+    "timestamp": "2024-01-01T00:00:00Z"
+}
+
+# Error Response
+{
+    "success": false,
+    "error": {
+        "code": "AUTH_INVALID_CREDENTIALS",
+        "message": "Invalid email or password",
+        "details": null  # Optional dict for validation errors
+    },
+    "timestamp": "2024-01-01T00:00:00Z"
+}
+```
+
+### 4.2 Endpoint Implementations
+
+**/.well-known/jwks.json** (Public)
+```
+GET /.well-known/jwks.json
+Response: Standard JWK Set
+Cache-Control: public, max-age=3600
+POST /auth/signup
+pythonRequest:
+{
+    "email": "user@example.com",  # Validate email format
+    "password": "SecurePass123!",  # Min 8 chars, complexity rules
+    "organization_name": "My Company"  # Optional, creates org if provided
+}
+
+Logic:
+1. Validate email format (RFC 5322)
+2. Check password complexity (min 8 chars, upper, lower, number, special)
+3. Check if email already exists (case-insensitive)
+4. Hash password using Argon2id
+5. BEGIN TRANSACTION
+6. Insert user
+7. If org_name provided: Create org + add user as 'owner'
+8. COMMIT TRANSACTION
+9. Generate verification token (store in Redis with 24h TTL)
+10. Return success (don't expose user ID)
+
+Response: 201 Created
+{
+    "success": true,
+    "data": {
+        "message": "Account created. Please verify your email."
+    }
+}
+POST /auth/login
+pythonRequest:
+{
+    "email": "user@example.com",
+    "password": "SecurePass123!",
+    "device_info": {  # Optional
+        "user_agent": "...",
+        "ip": "..."
+    }
+}
+
+Logic:
+1. Rate limit check (IP-based)
+2. Query user by email (case-insensitive)
+3. If user not found: Log failed attempt, return generic error (no user enumeration)
+4. Verify password
+5. If password invalid: Log failed attempt, increment counter
+6. If MFA enabled: 
+   - Generate temporary session token (store in Redis, 5 min TTL)
+   - Return 202 Accepted with `mfa_required: true`
+7. If no MFA or MFA passed:
+   - Log successful login
+   - Get user's default organization
+   - Generate access token (JWT)
+   - Generate refresh token (random + hash)
+   - Store refresh token in DB
+   - Return tokens
+
+Response: 200 OK (no MFA) or 202 Accepted (MFA required)
+POST /auth/mfa/verify
+pythonRequest:
+{
+    "session_token": "temp_token_from_login",
+    "totp_code": "123456"
+}
+
+Logic:
+1. Validate session token from Redis
+2. Get user_id from session
+3. Retrieve user's mfa_secret
+4. Verify TOTP code (allow 1 time step window)
+5. If valid:
+   - Delete session token
+   - Generate access + refresh tokens
+   - Store refresh token
+   - Return tokens
+6. If invalid:
+   - Increment failure counter
+   - After 3 failures: Invalidate session token
+POST /auth/refresh
+pythonRequest:
+{
+    "refresh_token": "opaque_token_string"
+}
+
+Logic:
+1. Rate limit check (token-based)
+2. Hash provided token
+3. BEGIN TRANSACTION
+4. Query refresh token by hash (with FOR UPDATE lock)
+5. Check expiration and revocation status
+6. If invalid: ROLLBACK, return 401
+7. Get user and org context
+8. Delete old refresh token
+9. Generate new refresh token
+10. Insert new refresh token
+11. COMMIT TRANSACTION
+12. Generate new access token
+13. Return both tokens
+
+Response: 200 OK
+{
+    "access_token": "...",
+    "refresh_token": "...",
+    "token_type": "Bearer",
+    "expires_in": 900  # seconds
+}
+POST /auth/switch-org
+pythonRequest:
+Headers: Authorization: Bearer <current_access_token>
+Body:
+{
+    "target_org_id": "uuid-of-target-org"
+}
+
+Logic:
+1. Decode and verify current JWT
+2. Extract user_id
+3. Query organization_members for (user_id, target_org_id)
+4. If membership doesn't exist: Return 403
+5. Get user's roles in target org
+6. Generate new JWT with:
+   - Same sub (user_id)
+   - New org_id (target_org_id)
+   - New roles array
+7. Return new access token
+
+Response: 200 OK
+{
+    "access_token": "...",
+    "token_type": "Bearer",
+    "expires_in": 900
+}
+POST /auth/logout
+pythonRequest:
+{
+    "refresh_token": "opaque_token_string",
+    "revoke_all": false  # If true, revoke all user's tokens
+}
+
+Logic:
+1. If revoke_all:
+   - Mark all refresh tokens for user as revoked
+2. Else:
+   - Hash provided token
+   - Mark specific token as revoked
+3. Log logout event
+4. Return success
+
+Response: 200 OK
+```
+
+---
+
+## 5. FILE STRUCTURE & ARCHITECTURE
+```
+idp_service/
+├── alembic/
+│   ├── versions/
+│   └── env.py
+├── app/
+│   ├── __init__.py
+│   ├── main.py                 # FastAPI app + lifespan events
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py           # Pydantic Settings
+│   │   ├── security.py         # Crypto utilities
+│   │   ├── dependencies.py     # Dependency injection
+│   │   └── exceptions.py       # Custom exceptions
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── base.py             # Import all models for Alembic
+│   │   └── session.py          # Async engine setup
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── user.py
+│   │   ├── organization.py
+│   │   ├── refresh_token.py
+│   │   └── audit_log.py
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── auth.py             # Request/Response models
+│   │   ├── user.py
+│   │   └── token.py
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── deps.py             # Dependency functions
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       ├── auth.py         # Auth endpoints
+│   │       ├── wellknown.py    # JWKS endpoint
+│   │       └── health.py       # Health checks
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── auth_service.py     # Business logic
+│   │   ├── token_service.py    # JWT operations
+│   │   └── audit_service.py    # Audit logging
+│   └── utils/
+│       ├── __init__.py
+│       ├── rate_limiter.py     # Redis rate limiting
+│       └── validators.py       # Input validation
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py             # Pytest fixtures
+│   ├── test_auth.py
+│   ├── test_token_rotation.py
+│   └── test_security.py
+├── keys/                       # .gitignore this directory
+│   ├── private_key.pem
+│   └── public_key.pem
+├── .env.example
+├── docker-compose.yml
+├── Dockerfile
+├── pyproject.toml
+└── README.md
+
+6. IMPLEMENTATION REQUIREMENTS
+6.1 Configuration (app/core/config.py)
+pythonfrom pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore"
+    )
+    
+    # Database
+    database_url: str
+    database_pool_size: int = 20
+    database_max_overflow: int = 40
+    
+    # Redis
+    redis_url: str
+    
+    # Security
+    private_key_path: str = "./keys/private_key.pem"
+    public_key_path: str = "./keys/public_key.pem"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+    
+    # Application
+    app_name: str = "Enterprise IdP"
+    issuer_url: str
+    cors_origins: list[str] = ["http://localhost:3000"]
+    
+    # Rate Limiting
+    login_rate_limit: int = 5
+    login_rate_window: int = 900  # 15 minutes
+6.2 Security Module (app/core/security.py)
+Must Include:
+
+generate_rsa_keypair() → Creates PEM files
+load_rsa_keys() → Loads keys into memory
+create_access_token(user_id, org_id, roles, email, verified) → Returns JWT string
+decode_access_token(token: str) → Returns claims dict or raises
+verify_password(plain: str, hashed: str) → bool
+hash_password(password: str) → str
+generate_refresh_token() → str
+hash_refresh_token(token: str) → str (SHA-256)
+generate_totp_secret() → str
+verify_totp(secret: str, code: str) → bool
+public_key_to_jwk() → dict (JWK format)
+
+6.3 Database Session (app/db/session.py)
+pythonfrom sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
+    pool_pre_ping=True,  # Verify connections before use
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+    autocommit=False,
+)
+
+async def get_db() -> AsyncSession:
+    """Dependency for database sessions."""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+6.4 Dependency Injection (app/api/deps.py)
+pythonfrom fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db)
+) -> User:
+    """
+    Validate access token and return current user.
+    
+    Security: Verifies JWT signature using public key.
+    """
+    token = credentials.credentials
+    try:
+        payload = decode_access_token(token)
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(401, "Invalid token")
+        
+        # Fetch user from DB to ensure still exists and verified
+        result = await db.execute(
+            select(User).where(User.id == user_id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(401, "User not found")
+        
+        return user
+    except JWTError:
+        raise HTTPException(401, "Could not validate credentials")
+6.5 Error Handling
+Implement custom exceptions:
+pythonclass AuthenticationError(Exception):
+    """Base authentication error."""
+
+class InvalidCredentialsError(AuthenticationError):
+    """Invalid email or password."""
+
+class MFARequiredError(AuthenticationError):
+    """MFA verification required."""
+
+class TokenExpiredError(AuthenticationError):
+    """Token has expired."""
+Global exception handler in main.py:
+python@app.exception_handler(AuthenticationError)
+async def auth_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=401,
+        content={
+            "success": False,
+            "error": {
+                "code": exc.__class__.__name__,
+                "message": str(exc)
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+6.6 Audit Logging
+Every auth event must be logged:
+pythonasync def log_audit_event(
+    db: AsyncSession,
+    event_type: str,
+    user_id: Optional[UUID],
+    ip_address: str,
+    success: bool,
+    details: Optional[dict] = None
+):
+    """
+    Create immutable audit log entry.
+    
+    CRITICAL: Never update or delete audit logs.
+    """
+    log_entry = AuditLog(
+        event_type=event_type,
+        user_id=user_id,
+        ip_address=ip_address,
+        success=success,
+        details=details,
+        timestamp=datetime.utcnow()
+    )
+    db.add(log_entry)
+    await db.commit()
+
+7. TESTING REQUIREMENTS
+Must Include:
+7.1 Integration Tests
+
+Test full auth flow: signup → login → refresh → logout
+Test token rotation (verify old token is invalidated)
+Test rate limiting enforcement
+Test MFA flow
+Test org switching with role changes
+
+7.2 Security Tests
+
+Test password hashing (verify Argon2id is used)
+Test JWT signature verification
+Test expired token rejection
+Test revoked token rejection
+Test SQL injection attempts (parameterized queries)
+
+7.3 Edge Cases
+
+Test concurrent refresh token use (should invalidate both)
+Test deleted user with valid token (should reject)
+Test organization member removal (switch-org should fail)
+
+
+8. FORBIDDEN PATTERNS
+YOU MUST NOT:
+
+Use except Exception: without logging
+Store passwords in plaintext (even temporarily)
+Use time.sleep() or any blocking calls
+Mix sync and async database operations
+Skip transaction boundaries on multi-step operations
+Use SELECT * in queries
+Expose internal errors to API responses
+Use string concatenation for SQL (always use parameterized queries)
+Return different error messages for "user not found" vs "invalid password"
+
+
+9. OBSERVABILITY REQUIREMENTS
+Implement:
+
+Structured logging (JSON format) with correlation IDs
+Health check endpoint (/health) that verifies:
+
+Database connectivity
+Redis connectivity
+RSA keys loaded
+
+
+Metrics endpoint (/metrics) for Prometheus:
+
+Login success/failure rates
+Token generation latency
+Active sessions count
+
+
+
+
+10. DOCKER SETUP
+docker-compose.yml must include:
+
+PostgreSQL with persistent volume
+Redis
+IdP service with health checks
+Explicit network configuration
+Environment variable injection
+
+
+FINAL CHECKLIST
+Before submitting code, verify:
+
+ All endpoints have rate limiting
+ All database operations use transactions appropriately
+ All passwords are hashed with Argon2id
+ JWTs use RS256 (never HS256)
+ Refresh tokens are rotated on every use
+ Refresh tokens are stored as hashes
+ Audit logs are created for all auth events
+ No secrets in code or version control
+ All type hints are explicit (no Any)
+ All async functions use await properly
+ Error messages don't leak information (no user enumeration)
+ JWKS endpoint returns valid JWK format
+ Tests cover token rotation, expiry, and revocation
+ Health checks verify all dependencies
+
+
+Begin implementation. Generate production-ready code following EVERY requirement above.
