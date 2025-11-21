@@ -5,7 +5,8 @@ from redis.asyncio import Redis
 from app.api import deps
 from app.schemas.auth import (
     UserCreate, UserLogin, MFAVerify, RefreshRequest,
-    LogoutRequest, SwitchOrgRequest, APIResponse, TokenResponse, MFAResponse
+    LogoutRequest, SwitchOrgRequest, ForgotPasswordRequest, ResetPasswordRequest,
+    APIResponse, TokenResponse, MFAResponse
 )
 from app.services.auth_service import AuthService
 from app.utils.rate_limiter import limiter
@@ -131,3 +132,39 @@ async def logout(
     service = AuthService(db, redis)
     await service.logout(logout_in.refresh_token, logout_in.revoke_all, request.client.host)
     return APIResponse(success=True, data={"message": "Logged out successfully"})
+
+@router.post("/forgot-password", response_model=APIResponse)
+async def forgot_password(
+    request: Request,
+    forgot_in: ForgotPasswordRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Initiate password recovery flow.
+    """
+    await limiter.limit(redis, request.client.host, "forgot_password", 3, 900) # 3 requests per 15 mins
+    service = AuthService(db, redis)
+    await service.forgot_password(forgot_in.email, request.client.host)
+    return APIResponse(
+        success=True,
+        data={"message": "If an account exists with this email, you will receive a password reset link."}
+    )
+
+@router.post("/reset-password", response_model=APIResponse)
+async def reset_password(
+    request: Request,
+    reset_in: ResetPasswordRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    redis: Redis = Depends(get_redis)
+):
+    """
+    Complete password reset flow.
+    """
+    await limiter.limit(redis, request.client.host, "reset_password", 5, 900)
+    service = AuthService(db, redis)
+    await service.reset_password(reset_in.token, reset_in.new_password, request.client.host)
+    return APIResponse(
+        success=True,
+        data={"message": "Password reset successfully. You can now login."}
+    )

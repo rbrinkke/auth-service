@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # UPDATED: Strictly required for production security
     MFA_ENCRYPTION_KEY: str  # 32 byte url-safe base64 encoded key
 
+    # Email
+    EMAIL_PROVIDER: str = "console"
+    FROM_EMAIL: str = "noreply@idp.example.com"
+
     # Application
     APP_NAME: str = "Enterprise IdP"
     ISSUER_URL: str = "https://idp.example.com"
