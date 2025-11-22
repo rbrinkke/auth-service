@@ -148,25 +148,6 @@ async def forgot_password(
         data={"message": "If an account exists with this email, you will receive a password reset link."}
     )
 
-@router.post("/reset-password", response_model=APIResponse)
-async def reset_password(
-    request: Request,
-    response: Response,
-    reset_in: ResetPasswordRequest,
-    db: AsyncSession = Depends(deps.get_db),
-    redis: Redis = Depends(get_redis)
-):
-    """
-    Complete password reset flow.
-    """
-    await limiter.limit(redis, request.client.host, "reset_password", 5, 900, response)
-    service = AuthService(db, redis)
-    await service.reset_password(reset_in.token, reset_in.new_password, request.client.host)
-    return APIResponse(
-        success=True,
-        data={"message": "Password reset successfully. You can now login."}
-    )
-
 # Email Verification Endpoints
 @router.post("/verify-email", response_model=APIResponse)
 async def verify_email(
