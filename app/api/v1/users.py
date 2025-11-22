@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete
-import pyotp
 from redis.asyncio import Redis
 
 from app.api import deps
 from app.schemas.auth import UserRead, APIResponse, SwitchOrgRequest
 from app.models import User, AuditLog, OrganizationMember, RefreshToken
-from app.core.security import decrypt_mfa_secret, encrypt_mfa_secret
+from app.core.security import decrypt_mfa_secret, encrypt_mfa_secret, generate_totp_secret, generate_provisioning_uri
 from app.core.config import settings
 from app.services.auth_service import AuthService
 from app.core.redis import redis_client
@@ -55,7 +54,7 @@ async def get_mfa_secret(
 
     if not current_user.mfa_secret:
         # Generate new secret if one doesn't exist
-        secret = pyotp.random_base32()
+        secret = generate_totp_secret()
         current_user.mfa_secret = encrypt_mfa_secret(secret)
         db.add(current_user)
         await db.commit()
@@ -65,8 +64,11 @@ async def get_mfa_secret(
         decrypted_secret = decrypt_mfa_secret(current_user.mfa_secret)
 
     # Generate otpauth URI
-    totp = pyotp.TOTP(decrypted_secret)
-    provisioning_uri = totp.provisioning_uri(name=current_user.email, issuer_name=settings.APP_NAME)
+    provisioning_uri = generate_provisioning_uri(
+        secret=decrypted_secret,
+        name=current_user.email,
+        issuer_name=settings.APP_NAME
+    )
 
     return APIResponse(success=True, data={
         "secret": decrypted_secret,

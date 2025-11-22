@@ -4,6 +4,9 @@ import hashlib
 import base64
 import json
 import asyncio
+import time
+import struct
+import hmac
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -14,7 +17,6 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.fernet import Fernet
-import pyotp
 
 from app.core.config import settings
 from app.core.exceptions import TokenExpiredError, InvalidTokenError
@@ -253,9 +255,105 @@ def generate_refresh_token() -> str:
 def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
-def generate_totp_secret() -> str:
-    return pyotp.random_base32()
+# --- Pure Python TOTP Implementation (RFC 6238) ---
 
-def verify_totp(secret: str, code: str) -> bool:
-    totp = pyotp.TOTP(secret)
-    return totp.verify(code, valid_window=1)
+def base32_decode(secret: str) -> bytes:
+    """Decode base32 secret (RFC 4648)"""
+    # Remove padding and convert to uppercase
+    secret = secret.upper().replace(' ', '').replace('=', '')
+    # Add padding back
+    padding_len = (8 - len(secret) % 8) % 8
+    secret += '=' * padding_len
+    return base64.b32decode(secret)
+
+def _generate_totp_code(secret: str, time_step: int = 30, digits: int = 6, digest=hashlib.sha1) -> str:
+    """
+    Generate TOTP code (RFC 6238)
+    Internal helper.
+    """
+    try:
+        key = base32_decode(secret)
+    except Exception:
+        # Invalid base32 string
+        return ""
+
+    # Calculate time counter
+    counter = int(time.time()) // time_step
+
+    # Convert counter to 8-byte big-endian
+    counter_bytes = struct.pack('>Q', counter)
+
+    # Calculate HMAC
+    hmac_hash = hmac.new(key, counter_bytes, digest).digest()
+
+    # Dynamic truncation
+    offset = hmac_hash[-1] & 0x0F
+    code = struct.unpack('>I', hmac_hash[offset:offset+4])[0] & 0x7FFFFFFF
+
+    # Generate OTP
+    otp = code % (10 ** digits)
+
+    return str(otp).zfill(digits)
+
+def generate_totp_secret() -> str:
+    """
+    Generate a random base32 encoded secret.
+    """
+    # Generate 20 bytes (160 bits) of randomness, which encodes to 32 base32 characters.
+    # standard for Google Authenticator is 16 bytes (128 bits) or 20 bytes (160 bits).
+    # pyotp.random_base32() generates 32 chars which corresponds to 20 bytes.
+    random_bytes = secrets.token_bytes(20)
+    return base64.b32encode(random_bytes).decode('utf-8').replace('=', '')
+
+def verify_totp(secret: str, code: str, valid_window: int = 1) -> bool:
+    """
+    Verify TOTP code with time window tolerance.
+    """
+    if not secret or not code:
+        return False
+
+    try:
+        key = base32_decode(secret)
+    except Exception:
+        return False
+
+    current_time = int(time.time())
+    time_step = 30
+    digits = 6
+    digest = hashlib.sha1
+
+    # Check current time and adjacent windows
+    for offset in range(-valid_window, valid_window + 1):
+        check_time = current_time + (offset * time_step)
+        counter = check_time // time_step
+
+        counter_bytes = struct.pack('>Q', counter)
+        hmac_hash = hmac.new(key, counter_bytes, digest).digest()
+        offset_byte = hmac_hash[-1] & 0x0F
+        binary = struct.unpack('>I', hmac_hash[offset_byte:offset_byte+4])[0] & 0x7FFFFFFF
+        otp = binary % (10 ** digits)
+        test_code = str(otp).zfill(digits)
+
+        if code == test_code:
+            return True
+
+    return False
+
+def generate_provisioning_uri(secret: str, name: str, issuer_name: Optional[str] = None) -> str:
+    """
+    Generate otpauth URI for QR code generation.
+    Format: otpauth://totp/{label}?secret={secret}&issuer={issuer}
+    Label is usually {issuer}:{name} or just {name}.
+    """
+    from urllib.parse import quote
+
+    label = quote(name)
+    if issuer_name:
+        label = f"{quote(issuer_name)}:{label}"
+
+    uri = f"otpauth://totp/{label}?secret={secret}"
+
+    if issuer_name:
+        uri += f"&issuer={quote(issuer_name)}"
+
+    return uri

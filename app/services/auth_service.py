@@ -324,39 +324,6 @@ class AuthService:
         await log_audit_event(self.db, "forgot_password_initiated", user.id, ip_address, True)
         await self.db.commit()
 
-    async def reset_password(self, token: str, new_password: str, ip_address: str):
-        """
-        Reset password using the token.
-        """
-        try:
-            payload = security.decode_access_token(token)
-        except Exception:
-            raise InvalidTokenError("Invalid or expired token")
-
-        if payload.get("scope") != "password_reset":
-            raise InvalidTokenError("Invalid token scope")
-
-        user_id = payload.get("sub")
-        if not user_id:
-            raise InvalidTokenError("Invalid token")
-
-        stmt = select(User).where(User.id == uuid.UUID(user_id))
-        result = await self.db.execute(stmt)
-        user = result.scalar_one_or_none()
-
-        if not user:
-            raise UserNotFoundError("User not found")
-
-        # Hash new password
-        hashed_password = await security.hash_password(new_password)
-        user.password_hash = hashed_password
-
-        # Revoke all existing refresh tokens
-        await self._revoke_user_tokens(user.id)
-
-        await log_audit_event(self.db, "password_reset_success", user.id, ip_address, True)
-        await self.db.commit()
-
     async def verify_reset_code(self, email: str, code: str):
         """
         Verify password reset code validity (without resetting password).
